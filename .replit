@@ -1,32 +1,5 @@
-modules = ["python-3.11", "nodejs-20"]
 run = "bash run.sh"
-
-[nix]
-channel = "stable-23_11"
-packages = [
-  "chromium",
-  "chromiumdriver",
-  "glib",
-  "nss",
-  "nspr",
-  "atk",
-  "cups",
-  "libdrm",
-  "libxkbcommon",
-  "xorg.libXcomposite",
-  "xorg.libXdamage",
-  "xorg.libXfixes",
-  "xorg.libXrandr",
-  "xorg.libX11",
-  "xorg.libXcb",
-  "xorg.libXext",
-  "mesa",
-  "alsa-lib",
-  "pango",
-  "cairo",
-  "expat",
-  "libuuid",
-]
+modules = ["python-3.11", "nodejs-20"]
 
 [deployment]
 run = ["bash", "run.sh"]

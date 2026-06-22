@@ -5,29 +5,27 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  LBCC Agent — iniciando..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# ── Python deps ───────────────────────────────────────────────────────────────
+# Python deps
 echo "📦 Instalando dependências Python..."
 pip install -q -r backend/requirements.txt
 
-# ── Playwright — usa o Chromium do sistema no Replit ─────────────────────────
-echo "🎭 Configurando Playwright..."
-playwright install chromium 2>/dev/null || true
+# Playwright — instala Chromium próprio se o do sistema não funcionar
+echo "🎭 Instalando Playwright Chromium..."
+playwright install chromium --with-deps 2>/dev/null || playwright install chromium
 
-# ── Frontend ──────────────────────────────────────────────────────────────────
-echo "📦 Instalando dependências Node..."
+# Node deps e build do frontend
+echo "📦 Node..."
 cd frontend
 npm install --silent
-
 echo "🔨 Buildando frontend..."
 npm run build
 cd ..
 
-# ── Variável de ambiente para headless ────────────────────────────────────────
+# Headless obrigatório no Replit
 export BROWSER_HEADLESS=true
 
-# ── Iniciar backend (serve frontend buildado também) ─────────────────────────
 echo ""
-echo "✅ Pronto! Acesse pela aba Webview do Replit."
+echo "✅ Iniciando servidor..."
 echo ""
 
 uvicorn backend.api.main:app --host 0.0.0.0 --port 8000
