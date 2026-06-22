@@ -1,6 +1,6 @@
 """
 Banco de dados — SQLite.
-Tabelas: conversations, messages, action_logs, procedures, executions
+Fase 1.1: tabela executions + coluna exec_id em action_logs
 """
 import aiosqlite
 import json
@@ -13,6 +13,7 @@ DB_PATH = Path(__file__).parent.parent / "data" / "lbcc.db"
 async def init_db():
     DB_PATH.parent.mkdir(exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        # Criar tabelas novas
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id          TEXT PRIMARY KEY,
@@ -64,9 +65,15 @@ async def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_messages_conv   ON messages(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_logs_conv       ON action_logs(conv_id);
-            CREATE INDEX IF NOT EXISTS idx_logs_exec       ON action_logs(exec_id);
             CREATE INDEX IF NOT EXISTS idx_executions_conv ON executions(conv_id);
         """)
+
+        # Migração segura: adicionar exec_id se não existir
+        try:
+            await db.execute("ALTER TABLE action_logs ADD COLUMN exec_id TEXT")
+        except Exception:
+            pass  # Coluna já existe
+
         await db.commit()
 
 
@@ -225,12 +232,10 @@ async def list_executions(limit: int = 50) -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
 
 
-async def get_execution(exec_id: str) -> dict | None:
+async def get_execution(exec_id: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT * FROM executions WHERE id=?", (exec_id,)
-        )
+        cur = await db.execute("SELECT * FROM executions WHERE id=?", (exec_id,))
         row = await cur.fetchone()
     return dict(row) if row else None
 
