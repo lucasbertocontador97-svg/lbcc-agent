@@ -56,7 +56,11 @@ class Browser:
 
         self._pw = await async_playwright().start()
 
-        self._ctx = await self._pw.chromium.launch_persistent_context(
+        import os
+        # Usar Chromium do Replit se disponível (mais rápido, sem precisar baixar)
+        replit_chrome = os.getenv("REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE", "")
+
+        launch_kwargs = dict(
             user_data_dir=str(PROFILE_DIR),
             headless=headless,
             slow_mo=100,
@@ -76,6 +80,11 @@ class Browser:
                 "--disable-software-rasterizer",
             ],
         )
+        if replit_chrome and os.path.exists(replit_chrome):
+            launch_kwargs["executable_path"] = replit_chrome
+            print(f"[browser] Usando Chromium do Replit: {replit_chrome}")
+
+        self._ctx = await self._pw.chromium.launch_persistent_context(**launch_kwargs)
 
         pages = self._ctx.pages
         self._page = pages[0] if pages else await self._ctx.new_page()
