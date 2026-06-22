@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 from openai import AsyncOpenAI
 
@@ -295,5 +295,4 @@ class Agent:
         return None
 
 
-from typing import Optional
 agent = Agent()
