@@ -527,3 +527,17 @@ textarea::placeholder { color: var(--text3); }
   background: var(--red); padding: 1px 4px; border-radius: 3px;
   letter-spacing: .04em;
 }
+
+/* ── Fase 2 ── */
+.step-banner {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 4px 20px; padding: 10px 14px;
+  background: rgba(59,110,234,.1); border: 1px solid rgba(59,110,234,.3);
+  border-radius: 10px; font-size: 13px; color: var(--text2);
+}
+.approval-banner {
+  margin: 4px 20px; padding: 12px 14px;
+  background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.25);
+  border-radius: 10px;
+}
+.approval-msg { font-size: 13px; color: var(--amber); margin-bottom: 10px; }
