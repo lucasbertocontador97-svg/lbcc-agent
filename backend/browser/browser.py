@@ -1,6 +1,6 @@
 """
 Browser — Chromium persistente via Playwright.
-Uma única instância compartilhada por toda a aplicação.
+Fase 1.1: screenshot automático, vídeo, stop, timeout, retry, modo manual.
 """
 import asyncio
 import base64
@@ -8,12 +8,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from playwright.async_api import (
-    async_playwright, BrowserContext, Page, Playwright
-)
+from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
-PROFILE_DIR = Path(__file__).parent.parent / "data" / "chrome_profile"
-DOWNLOADS_DIR = Path(__file__).parent.parent / "data" / "downloads"
+DATA_DIR      = Path(__file__).parent.parent / "data"
+PROFILE_DIR   = DATA_DIR / "chrome_profile"
+DOWNLOADS_DIR = DATA_DIR / "downloads"
+SCREENSHOTS_DIR = DATA_DIR / "screenshots"
+VIDEOS_DIR    = DATA_DIR / "videos"
 
 
 class Browser:
@@ -23,11 +24,19 @@ class Browser:
         self._page: Optional[Page] = None
         self._lock = asyncio.Lock()
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
+        # Controle de execução
+        self._stop_flag = False
+        self._manual_mode = False
 
-    async def start(self, headless: bool = False):
-        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        # Exec atual (para associar screenshots/vídeo)
+        self.current_exec_id: Optional[str] = None
+        self._exec_screenshot_count = 0
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────────
+
+    async def start(self, headless: bool = True):
+        for d in [PROFILE_DIR, DOWNLOADS_DIR, SCREENSHOTS_DIR, VIDEOS_DIR]:
+            d.mkdir(parents=True, exist_ok=True)
 
         self._pw = await async_playwright().start()
 
@@ -40,15 +49,14 @@ class Browser:
             timezone_id="America/Sao_Paulo",
             accept_downloads=True,
             downloads_path=str(DOWNLOADS_DIR),
+            record_video_dir=str(VIDEOS_DIR),
+            record_video_size={"width": 1366, "height": 768},
             args=["--disable-blink-features=AutomationControlled"],
         )
 
         pages = self._ctx.pages
         self._page = pages[0] if pages else await self._ctx.new_page()
-
-        # Captura downloads automáticos
         self._ctx.on("page", lambda p: p.on("download", self._on_download))
-
         print("[browser] Chromium iniciado.")
 
     async def stop(self):
@@ -63,7 +71,56 @@ class Browser:
         await download.save_as(str(dest))
         print(f"[browser] Download: {dest}")
 
-    # ── Ações ─────────────────────────────────────────────────────────────────
+    # ── Controle de execução ───────────────────────────────────────────────────
+
+    def request_stop(self):
+        """Sinaliza para o agente parar na próxima iteração."""
+        self._stop_flag = True
+
+    def clear_stop(self):
+        self._stop_flag = False
+
+    @property
+    def should_stop(self) -> bool:
+        return self._stop_flag
+
+    def set_manual_mode(self, active: bool):
+        self._manual_mode = active
+
+    @property
+    def is_manual_mode(self) -> bool:
+        return self._manual_mode
+
+    def begin_execution(self, exec_id: str):
+        self.current_exec_id = exec_id
+        self._exec_screenshot_count = 0
+        self.clear_stop()
+
+    def end_execution(self):
+        self.current_exec_id = None
+
+    # ── Screenshot ─────────────────────────────────────────────────────────────
+
+    async def screenshot(self, label: str = "") -> dict:
+        """Tira screenshot, salva em disco e retorna base64."""
+        try:
+            exec_id = self.current_exec_id or "manual"
+            self._exec_screenshot_count += 1
+            fname = f"{exec_id}_{self._exec_screenshot_count:03d}"
+            if label:
+                safe = label.replace(" ", "_")[:30]
+                fname += f"_{safe}"
+            fname += ".jpg"
+
+            path = SCREENSHOTS_DIR / fname
+            raw = await self._page.screenshot(type="jpeg", quality=75)
+            path.write_bytes(raw)
+            b64 = base64.b64encode(raw).decode()
+            return {"ok": True, "b64": b64, "path": str(path), "filename": fname}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Ações do browser ───────────────────────────────────────────────────────
 
     async def navigate(self, url: str) -> dict:
         async with self._lock:
@@ -71,8 +128,9 @@ class Browser:
             try:
                 await self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 title = await self._page.title()
-                return {"ok": True, "url": self._page.url,
-                        "title": title, "ms": int((time.time()-t0)*1000)}
+                result = {"ok": True, "url": self._page.url,
+                          "title": title, "ms": int((time.time()-t0)*1000)}
+                return result
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
@@ -98,22 +156,10 @@ class Browser:
         await asyncio.sleep(ms / 1000)
         return {"ok": True, "ms": ms}
 
-    async def screenshot(self) -> dict:
-        """Retorna base64 do screenshot atual."""
-        try:
-            raw = await self._page.screenshot(type="jpeg", quality=75)
-            b64 = base64.b64encode(raw).decode()
-            return {"ok": True, "base64": b64}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
     async def page_state(self) -> dict:
-        """Snapshot da página para o LLM decidir a próxima ação."""
         try:
-            url = self._page.url
+            url   = self._page.url
             title = await self._page.title()
-
-            # Elementos interativos visíveis
             elements = await self._page.evaluate("""() => {
                 const visible = el => {
                     const r = el.getBoundingClientRect();
@@ -122,8 +168,7 @@ class Browser:
                 return Array.from(document.querySelectorAll(
                     'a, button, input, select, textarea, [role=button]'
                 ))
-                .filter(visible)
-                .slice(0, 30)
+                .filter(visible).slice(0, 30)
                 .map(el => ({
                     tag: el.tagName.toLowerCase(),
                     type: el.type || '',
@@ -133,19 +178,11 @@ class Browser:
                     href: el.href || '',
                 }));
             }""")
-
-            # Texto visível resumido
-            body_text = await self._page.evaluate("""() =>
+            body = await self._page.evaluate("""() =>
                 document.body?.innerText?.replace(/\\s+/g,' ')?.substring(0, 1500) || ''
             """)
-
-            return {
-                "ok": True,
-                "url": url,
-                "title": title,
-                "elements": elements,
-                "body": body_text,
-            }
+            return {"ok": True, "url": url, "title": title,
+                    "elements": elements, "body": body}
         except Exception as e:
             return {"ok": False, "error": str(e), "url": ""}
 
@@ -153,6 +190,21 @@ class Browser:
     def url(self) -> str:
         return self._page.url if self._page else ""
 
+    # ── Vídeo ──────────────────────────────────────────────────────────────────
 
-# Instância global
+    def list_videos(self) -> list[dict]:
+        videos = []
+        for f in sorted(VIDEOS_DIR.glob("*.webm"), key=lambda x: -x.stat().st_mtime):
+            videos.append({"filename": f.name, "size": f.stat().st_size,
+                           "url": f"/api/videos/{f.name}"})
+        return videos
+
+    def list_screenshots(self) -> list[dict]:
+        shots = []
+        for f in sorted(SCREENSHOTS_DIR.glob("*.jpg"), key=lambda x: -x.stat().st_mtime):
+            shots.append({"filename": f.name, "size": f.stat().st_size,
+                          "url": f"/api/screenshots/{f.name}"})
+        return shots
+
+
 browser = Browser()
