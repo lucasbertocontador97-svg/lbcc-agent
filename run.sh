@@ -5,15 +5,28 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  LBCC Agent — iniciando..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+# Encontrar pip/python corretos
+PIP=$(which pip3 || which pip || echo "")
+PYTHON=$(which python3.11 || which python3 || which python || echo "")
+
+if [ -z "$PIP" ]; then
+  echo "pip não encontrado, tentando instalar via python..."
+  $PYTHON -m ensurepip --upgrade 2>/dev/null || true
+  PIP="$PYTHON -m pip"
+fi
+
+echo "Python: $PYTHON"
+echo "Pip: $PIP"
+
 # Python deps
 echo "📦 Instalando dependências Python..."
-pip install -q -r backend/requirements.txt
+$PIP install -q -r backend/requirements.txt
 
-# Playwright — instala Chromium próprio se o do sistema não funcionar
+# Playwright
 echo "🎭 Instalando Playwright Chromium..."
-playwright install chromium --with-deps 2>/dev/null || playwright install chromium
+$PYTHON -m playwright install chromium 2>/dev/null || true
 
-# Node deps e build do frontend
+# Node
 echo "📦 Node..."
 cd frontend
 npm install --silent
@@ -21,11 +34,10 @@ echo "🔨 Buildando frontend..."
 npm run build
 cd ..
 
-# Headless obrigatório no Replit
 export BROWSER_HEADLESS=true
 
 echo ""
 echo "✅ Iniciando servidor..."
 echo ""
 
-uvicorn backend.api.main:app --host 0.0.0.0 --port 8000
+$PYTHON -m uvicorn backend.api.main:app --host 0.0.0.0 --port 8000
