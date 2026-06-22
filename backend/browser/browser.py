@@ -10,11 +10,11 @@ from typing import Optional
 
 from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
-DATA_DIR      = Path(__file__).parent.parent / "data"
-PROFILE_DIR   = DATA_DIR / "chrome_profile"
-DOWNLOADS_DIR = DATA_DIR / "downloads"
+DATA_DIR        = Path(__file__).parent.parent / "data"
+PROFILE_DIR     = DATA_DIR / "chrome_profile"
+DOWNLOADS_DIR   = DATA_DIR / "downloads"
 SCREENSHOTS_DIR = DATA_DIR / "screenshots"
-VIDEOS_DIR    = DATA_DIR / "videos"
+VIDEOS_DIR      = DATA_DIR / "videos"
 
 
 class Browser:
@@ -23,12 +23,8 @@ class Browser:
         self._ctx: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._lock = asyncio.Lock()
-
-        # Controle de execução
         self._stop_flag = False
         self._manual_mode = False
-
-        # Exec atual (para associar screenshots/vídeo)
         self.current_exec_id: Optional[str] = None
         self._exec_screenshot_count = 0
 
@@ -51,7 +47,14 @@ class Browser:
             downloads_path=str(DOWNLOADS_DIR),
             record_video_dir=str(VIDEOS_DIR),
             record_video_size={"width": 1366, "height": 768},
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-software-rasterizer",
+            ],
         )
 
         pages = self._ctx.pages
@@ -71,10 +74,9 @@ class Browser:
         await download.save_as(str(dest))
         print(f"[browser] Download: {dest}")
 
-    # ── Controle de execução ───────────────────────────────────────────────────
+    # ── Controle ───────────────────────────────────────────────────────────────
 
     def request_stop(self):
-        """Sinaliza para o agente parar na próxima iteração."""
         self._stop_flag = True
 
     def clear_stop(self):
@@ -102,35 +104,38 @@ class Browser:
     # ── Screenshot ─────────────────────────────────────────────────────────────
 
     async def screenshot(self, label: str = "") -> dict:
-        """Tira screenshot, salva em disco e retorna base64."""
         try:
             exec_id = self.current_exec_id or "manual"
             self._exec_screenshot_count += 1
-            fname = f"{exec_id}_{self._exec_screenshot_count:03d}"
-            if label:
-                safe = label.replace(" ", "_")[:30]
-                fname += f"_{safe}"
+            safe_label = label.replace(" ", "_").replace("/", "_")[:30]
+            fname = f"{exec_id[:8]}_{self._exec_screenshot_count:03d}"
+            if safe_label:
+                fname += f"_{safe_label}"
             fname += ".jpg"
 
             path = SCREENSHOTS_DIR / fname
-            raw = await self._page.screenshot(type="jpeg", quality=75)
+            # Aguardar um momento para a página estabilizar
+            await asyncio.sleep(0.5)
+            raw = await self._page.screenshot(type="jpeg", quality=70, full_page=False)
             path.write_bytes(raw)
             b64 = base64.b64encode(raw).decode()
             return {"ok": True, "b64": b64, "path": str(path), "filename": fname}
         except Exception as e:
+            print(f"[browser] Screenshot falhou: {e}")
             return {"ok": False, "error": str(e)}
 
-    # ── Ações do browser ───────────────────────────────────────────────────────
+    # ── Ações ──────────────────────────────────────────────────────────────────
 
     async def navigate(self, url: str) -> dict:
         async with self._lock:
             t0 = time.time()
             try:
                 await self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                # Aguardar página carregar um pouco mais
+                await asyncio.sleep(1)
                 title = await self._page.title()
-                result = {"ok": True, "url": self._page.url,
-                          "title": title, "ms": int((time.time()-t0)*1000)}
-                return result
+                return {"ok": True, "url": self._page.url,
+                        "title": title, "ms": int((time.time()-t0)*1000)}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
@@ -190,21 +195,17 @@ class Browser:
     def url(self) -> str:
         return self._page.url if self._page else ""
 
-    # ── Vídeo ──────────────────────────────────────────────────────────────────
-
     def list_videos(self) -> list[dict]:
-        videos = []
-        for f in sorted(VIDEOS_DIR.glob("*.webm"), key=lambda x: -x.stat().st_mtime):
-            videos.append({"filename": f.name, "size": f.stat().st_size,
-                           "url": f"/api/videos/{f.name}"})
-        return videos
+        return [{"filename": f.name, "size": f.stat().st_size,
+                 "url": f"/api/videos/{f.name}"}
+                for f in sorted(VIDEOS_DIR.glob("*.webm"),
+                                key=lambda x: -x.stat().st_mtime)]
 
     def list_screenshots(self) -> list[dict]:
-        shots = []
-        for f in sorted(SCREENSHOTS_DIR.glob("*.jpg"), key=lambda x: -x.stat().st_mtime):
-            shots.append({"filename": f.name, "size": f.stat().st_size,
-                          "url": f"/api/screenshots/{f.name}"})
-        return shots
+        return [{"filename": f.name, "size": f.stat().st_size,
+                 "url": f"/api/screenshots/{f.name}"}
+                for f in sorted(SCREENSHOTS_DIR.glob("*.jpg"),
+                                key=lambda x: -x.stat().st_mtime)]
 
 
 browser = Browser()
