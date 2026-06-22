@@ -5,26 +5,33 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  LBCC Agent — iniciando..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-PYTHON=/home/runner/workspace/.pythonlibs/bin/python3.11
-PYTHONLIBS=/home/runner/workspace/.pythonlibs
+# Python via Nix (disponível no PATH do Replit quando via Run)
+PYTHON=$(which python3.11 2>/dev/null || which python3 2>/dev/null || echo "")
+
+if [ -z "$PYTHON" ]; then
+  echo "❌ Python não encontrado no PATH"
+  echo "PATH=$PATH"
+  exit 1
+fi
 
 echo "Python: $PYTHON"
+echo "pip index: $PIP_INDEX_URL"
 
-# Usar pip das pythonlibs diretamente
-export PATH="$PYTHONLIBS/bin:$PATH"
-export PYTHONPATH="$PYTHONLIBS/lib/python3.11/site-packages:$PYTHONPATH"
+# Instalar em diretório local (sem precisar de root)
+INSTALL_DIR="$HOME/.local"
+mkdir -p "$INSTALL_DIR"
 
 echo "📦 Instalando dependências Python..."
-$PYTHON -m pip install -q \
-  --target="$PYTHONLIBS/lib/python3.11/site-packages" \
-  --upgrade \
-  -r backend/requirements.txt 2>/dev/null || \
-$PYTHON -m pip install -q \
-  --prefix="$PYTHONLIBS" \
+$PYTHON -m pip install \
+  --user \
+  --quiet \
+  --index-url "${PIP_INDEX_URL:-https://pypi.org/simple/}" \
   -r backend/requirements.txt
 
-echo "🎭 Playwright Chromium..."
-$PYTHON -m playwright install chromium 2>/dev/null || true
+# Playwright usa o Chromium do Replit (sem precisar instalar)
+echo "🎭 Configurando Playwright..."
+export PLAYWRIGHT_BROWSERS_PATH="${REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE%/chromium-*/chrome-linux/chrome}"
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 echo "✅ Frontend pré-buildado"
 export BROWSER_HEADLESS=true
