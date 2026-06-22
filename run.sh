@@ -5,17 +5,42 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  LBCC Agent — iniciando..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Encontrar pip/python corretos
-PIP=$(which pip3 || which pip || echo "")
-PYTHON=$(which python3.11 || which python3 || which python || echo "")
+# Encontrar Python no Replit
+PYTHON=""
+for p in /home/runner/workspace/.pythonlibs/bin/python3.11 \
+          /usr/local/bin/python3.11 \
+          /usr/bin/python3.11 \
+          /home/runner/workspace/.pythonlibs/bin/python3 \
+          $(which python3 2>/dev/null) \
+          $(which python 2>/dev/null); do
+  if [ -x "$p" ]; then
+    PYTHON="$p"
+    break
+  fi
+done
 
-if [ -z "$PIP" ]; then
-  echo "pip não encontrado, tentando instalar via python..."
-  $PYTHON -m ensurepip --upgrade 2>/dev/null || true
-  PIP="$PYTHON -m pip"
+if [ -z "$PYTHON" ]; then
+  echo "❌ Python não encontrado!"
+  exit 1
 fi
 
 echo "Python: $PYTHON"
+
+# pip via pythonlibs
+PIP_DIR=$(dirname "$PYTHON")
+PIP=""
+for p in "$PIP_DIR/pip3" "$PIP_DIR/pip" "/home/runner/workspace/.pythonlibs/bin/pip3"; do
+  if [ -x "$p" ]; then
+    PIP="$p"
+    break
+  fi
+done
+
+if [ -z "$PIP" ]; then
+  echo "pip não encontrado, usando python -m pip..."
+  PIP="$PYTHON -m pip"
+fi
+
 echo "Pip: $PIP"
 
 # Python deps
