@@ -124,8 +124,8 @@ class Agent:
                 text = cmd.get("message", "Concluído.")
                 # Screenshot final
                 ss = await browser.screenshot("resultado_final")
-                if ss["ok"]:
-                    yield {"type": "screenshot", "b64": ss["b64"],
+                if ss.get("ok") and ss.get("b64"):
+                    yield {"type": "screenshot", "b64": ss.get("b64", ""),
                            "label": "Resultado final"}
                 yield {"type": "done", "text": text}
                 await db.save_action_log(
@@ -162,8 +162,8 @@ class Agent:
                 label  = "wait"
             elif action == "screenshot":
                 ss = await browser.screenshot("manual")
-                if ss["ok"]:
-                    yield {"type": "screenshot", "b64": ss["b64"], "label": "Manual"}
+                if ss.get("ok") and ss.get("b64"):
+                    yield {"type": "screenshot", "b64": ss.get("b64", ""), "label": "Manual"}
                 result = {"ok": ss["ok"]}
             else:
                 result = {"ok": False, "error": f"Ação desconhecida: {action}"}
@@ -173,8 +173,8 @@ class Agent:
             # ── Screenshot automático após toda ação ───────────────────────
             if action != "screenshot" and action != "wait":
                 ss = await browser.screenshot(label)
-                if ss["ok"]:
-                    yield {"type": "screenshot", "b64": ss["b64"], "label": label}
+                if ss.get("ok") and ss.get("b64"):
+                    yield {"type": "screenshot", "b64": ss.get("b64", ""), "label": label}
 
             # ── Log no banco ───────────────────────────────────────────────
             await db.save_action_log(

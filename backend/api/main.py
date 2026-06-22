@@ -79,8 +79,8 @@ async def websocket(ws: WebSocket, sid: str):
                 await wsm.send(sid, {"type": "system", "text": "Controle devolvido ao agente."})
             elif t == "screenshot":
                 ss = await browser.screenshot("manual")
-                if ss["ok"]:
-                    await wsm.send(sid, {"type": "screenshot", "b64": ss["b64"], "label": "Manual"})
+                if ss.get("ok") and ss.get("b64"):
+                    await wsm.send(sid, {"type": "screenshot", "b64": ss.get("b64", ""), "label": "Manual"})
             elif t == "ping":
                 await wsm.send(sid, {"type": "pong"})
 
