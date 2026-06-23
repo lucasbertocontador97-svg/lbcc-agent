@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Optional
@@ -126,6 +127,14 @@ class Agent:
             yield {"type": "done", "text": f"Acessei {direct_url}"}
             return
 
+        hub_task_count = self._classify_hub_task_count(user_message, history)
+        if hub_task_count:
+            async for event in self._run_hub_task_count(
+                hub_task_count["person"], hub_task_count["status"], conv_id, exec_id
+            ):
+                yield event
+            return
+
         tab_result = await self._handle_tab_command(user_message)
         if tab_result:
             yield tab_result
@@ -232,6 +241,116 @@ class Agent:
         if "folha" in m:
             return "go_payroll"
         return None
+
+    def _norm(self, value: str) -> str:
+        return "".join(
+            c for c in unicodedata.normalize("NFD", value or "")
+            if unicodedata.category(c) != "Mn"
+        ).lower()
+
+    def _history_text(self, history: list[dict]) -> str:
+        parts = []
+        for item in (history or [])[-6:]:
+            content = item.get("content", "")
+            if content:
+                parts.append(content)
+        return "\n".join(parts)
+
+    def _classify_hub_task_count(self, msg: str, history: list[dict]) -> Optional[dict]:
+        combined = msg
+        normalized_msg = self._norm(msg)
+        if normalized_msg in ("faca isso", "faça isso", "faz isso", "pode fazer", "prossiga"):
+            combined = f"{self._history_text(history)}\n{msg}"
+
+        normalized = self._norm(combined)
+        if "tarefa" not in normalized:
+            return None
+        if not any(token in normalized for token in ("pendente", "aberto", "aberta", "em aberto")):
+            return None
+
+        person = ""
+        patterns = [
+            r"(?:para|pro|responsavel|responsável|colaborador|usuario|usuário)\s+(?:o\s+|a\s+)?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ._-]{1,40})",
+            r"(?:do|da)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ._-]{1,40})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, combined, flags=re.IGNORECASE)
+            if match:
+                person = match.group(1)
+                break
+        if not person and "alberto" in normalized:
+            person = "Alberto"
+        if not person:
+            return None
+        person = re.split(r"\b(?:pendente|pendentes|aberto|abertas|em aberto|agora|quantas|tem)\b", person, flags=re.IGNORECASE)[0]
+        person = person.strip(" .,:;?\"'")
+        if not person:
+            return None
+        return {"person": person.title(), "status": "pendente"}
+
+    async def _run_hub_task_count(
+        self, person: str, status: str, conv_id: str, exec_id: str
+    ) -> AsyncGenerator[dict, None]:
+        context = await browser.get_page_context()
+        current = (context.get("url", "") + " " + context.get("title", "")).lower()
+        if "hublbcc" not in current:
+            async for event in self._execute_cmd({"action": "navigate", "url": "https://hublbcc.com.br/"}, conv_id, exec_id):
+                yield event
+
+        context = await browser.get_page_context()
+        if "tarefas" not in context.get("url", "").lower():
+            async for event in self._execute_cmd({"action": "click_text", "text": "Tarefas"}, conv_id, exec_id):
+                yield event
+
+        async for event in self._execute_cmd(
+            {"action": "fill", "selector": "input[placeholder='Buscar por responsavel']", "value": person},
+            conv_id,
+            exec_id,
+        ):
+            yield event
+
+        status_clicked = False
+        for text in ("Todos Status", "Status", "Pendente", "Pendentes"):
+            async for event in self._execute_cmd({"action": "click_text", "text": text}, conv_id, exec_id):
+                yield event
+                if event.get("type") == "result" and event.get("ok"):
+                    status_clicked = True
+                    break
+            if status_clicked and text in ("Pendente", "Pendentes"):
+                break
+            if text in ("Todos Status", "Status") and status_clicked:
+                status_clicked = False
+                continue
+
+        await browser.wait(900)
+        summary = await browser.task_page_summary()
+        ss = await browser.screenshot("hub_task_count")
+        if ss.get("ok") and ss.get("b64"):
+            yield {"type": "screenshot", "b64": ss["b64"], "label": "Tarefas filtradas"}
+
+        counters = summary.get("counters", {}) if summary.get("ok") else {}
+        pending_count = None
+        for key, value in counters.items():
+            if "pendente" in self._norm(key):
+                pending_count = value
+                break
+        if pending_count is None:
+            pending_count = summary.get("visible_row_count", 0) if summary.get("ok") else 0
+
+        rows = summary.get("visible_rows", []) if summary.get("ok") else []
+        yield {
+            "type": "done",
+            "text": (
+                f"Encontrei {pending_count} tarefa(s) pendente(s) para {person}. "
+                f"Filtro aplicado na tela."
+            ),
+            "details": {
+                "person": person,
+                "status": status,
+                "count": pending_count,
+                "sample_rows": rows[:5],
+            },
+        }
 
     async def _run_iob_command(
         self, command: str, conv_id: str, exec_id: str, user_message: str = ""

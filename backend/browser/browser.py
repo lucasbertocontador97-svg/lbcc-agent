@@ -574,6 +574,8 @@ class Browser:
                 return ""
 
     def _selector_attempts(self, selector: str) -> list[str]:
+        if selector.startswith(("role=", "text=", ":")):
+            return [selector]
         attempts = [selector]
         if not selector.startswith(("#", ".", "[", "input", "button", "a", "select", "textarea")):
             attempts += [
@@ -680,6 +682,74 @@ class Browser:
             })
             return ""
 
+    async def _fallback_click_selector(self, selector: str) -> str:
+        words = self._selector_hint_words(selector)
+        if not words:
+            return ""
+        token = f"lbcc-click-{int(time.time() * 1000)}"
+        try:
+            found = await self._page.evaluate(
+                """({words, token}) => {
+                    const normalize = value => (value || '')
+                        .normalize('NFD')
+                        .replace(/[\\u0300-\\u036f]/g, '')
+                        .toLowerCase();
+                    const wanted = words.map(normalize).filter(Boolean);
+                    const nodes = Array.from(document.querySelectorAll(
+                        'button, a, [role=button], [role=link], [role=menuitem], input, select, textarea, div, span'
+                    ));
+                    const visible = el => {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style && style.visibility !== 'hidden'
+                            && style.display !== 'none'
+                            && rect.width > 4
+                            && rect.height > 4;
+                    };
+                    const textOf = el => [
+                        el.innerText,
+                        el.textContent,
+                        el.value,
+                        el.getAttribute('placeholder'),
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title'),
+                        el.getAttribute('name')
+                    ].filter(Boolean).join(' ');
+                    let best = null;
+                    let bestScore = 0;
+                    for (const el of nodes) {
+                        if (!visible(el)) continue;
+                        const haystack = normalize(textOf(el));
+                        const score = wanted.reduce((total, word) => (
+                            total + (haystack.includes(word) ? 1 : 0)
+                        ), 0);
+                        if (score > bestScore) {
+                            best = el;
+                            bestScore = score;
+                        }
+                    }
+                    if (!best || bestScore === 0) return '';
+                    best.setAttribute('data-lbcc-click-target', token);
+                    return `[data-lbcc-click-target="${token}"]`;
+                }""",
+                {"words": words, "token": token},
+            )
+            if found:
+                self._log("safe_click", {
+                    "selector": selector,
+                    "step": "fallback_click_encontrado",
+                    "fallback_selector": found,
+                    "words": words,
+                })
+            return found or ""
+        except Exception as e:
+            self._log("safe_click", {
+                "selector": selector,
+                "step": "fallback_click_falhou",
+                "error": str(e)[:250],
+            })
+            return ""
+
     async def click(self, selector: str) -> dict:
         return await self.safe_click(selector)
 
@@ -688,13 +758,18 @@ class Browser:
             last_error = ""
             for attempt_no in range(1, retries + 1):
                 await self.wait_for_react()
-                for sel in self._selector_attempts(selector):
+                candidates = self._selector_attempts(selector)
+                fallback = await self._fallback_click_selector(selector)
+                if fallback:
+                    candidates.append(fallback)
+                for sel in candidates:
                     try:
                         locator = self._page.locator(sel).first
-                        await locator.wait_for(state="attached", timeout=timeout)
+                        candidate_timeout = min(timeout, 3500) if sel == selector and len(candidates) > 1 else timeout
+                        await locator.wait_for(state="attached", timeout=candidate_timeout)
                         self._log("safe_click", {"selector": sel, "step": "elemento_encontrado", "attempt": attempt_no})
-                        await locator.scroll_into_view_if_needed(timeout=timeout)
-                        await locator.wait_for(state="visible", timeout=timeout)
+                        await locator.scroll_into_view_if_needed(timeout=candidate_timeout)
+                        await locator.wait_for(state="visible", timeout=candidate_timeout)
                         enabled = await locator.is_enabled(timeout=2_000)
                         if not enabled:
                             last_error = "Campo desabilitado"
@@ -1028,6 +1103,56 @@ class Browser:
                     "tabs": tabs, "active_tab": self._active_idx}
         except Exception as e:
             return {"ok": False, "error": str(e), "url": ""}
+
+    async def task_page_summary(self) -> dict:
+        try:
+            data = await self._page.evaluate("""() => {
+                const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+                const visible = el => {
+                    const style = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return style.visibility !== 'hidden'
+                        && style.display !== 'none'
+                        && r.width > 8
+                        && r.height > 8;
+                };
+                const text = clean(document.body?.innerText || '');
+                const counters = {};
+                for (const match of text.matchAll(/([A-Za-zÀ-ÿ ]{3,})\\s*\\((\\d+)\\)/g)) {
+                    counters[clean(match[1])] = Number(match[2]);
+                }
+                const rowSelectors = [
+                    'tbody tr',
+                    '[role=row]',
+                    '[class*=card]',
+                    '[class*=task]',
+                    '[class*=tarefa]'
+                ];
+                const seen = new Set();
+                const rows = [];
+                for (const selector of rowSelectors) {
+                    for (const el of Array.from(document.querySelectorAll(selector)).filter(visible)) {
+                        const rowText = clean(el.innerText || el.textContent || '');
+                        if (rowText.length < 8 || seen.has(rowText)) continue;
+                        seen.add(rowText);
+                        rows.push(rowText.slice(0, 240));
+                    }
+                }
+                return {
+                    text: text.slice(0, 5000),
+                    counters,
+                    visible_rows: rows.slice(0, 80),
+                    visible_row_count: rows.length
+                };
+            }""")
+            self._log("task_page_summary", {
+                "url": self._page.url,
+                "counters": data.get("counters", {}),
+                "visible_row_count": data.get("visible_row_count", 0),
+            })
+            return {"ok": True, "url": self._page.url, **data}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "url": self._page.url if self._page else ""}
 
     async def get_page_context(self) -> dict:
         try:
