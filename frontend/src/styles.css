@@ -163,6 +163,76 @@ html, body, #root { height: 100%; font-family: var(--sans); background: var(--bg
   flex-direction: column;
 }
 
+.manual-viewer {
+  width: min(960px, calc(100% - 32px));
+  margin: 0 auto 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.manual-viewer-bar {
+  min-height: 42px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.manual-viewer-bar strong {
+  display: block;
+  font-size: 13px;
+}
+.manual-viewer-bar span {
+  display: block;
+  margin-top: 2px;
+  color: var(--text3);
+  font: 11px var(--mono);
+}
+.manual-screen {
+  min-height: 280px;
+  display: grid;
+  place-items: center;
+  background: #05070b;
+  cursor: crosshair;
+}
+.manual-screen img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: min(62vh, 720px);
+  object-fit: contain;
+  user-select: none;
+}
+.manual-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+}
+.manual-type-input {
+  min-width: 0;
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px var(--sans);
+}
+
+@media (max-width: 680px) {
+  .manual-controls {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+  .manual-type-input {
+    grid-column: 1 / -1;
+  }
+}
+
 .welcome {
   flex: 1;
   display: flex;

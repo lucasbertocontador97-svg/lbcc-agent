@@ -452,6 +452,22 @@ async def control_stop():
         "teaching": browser.teaching_status(),
     }
 
+@app.post("/api/control/screenshot")
+async def control_screenshot():
+    return await browser.screenshot("manual_live")
+
+@app.post("/api/control/click")
+async def control_click(body: dict):
+    return await browser.click_point(body.get("x", 0), body.get("y", 0))
+
+@app.post("/api/control/type")
+async def control_type(body: dict):
+    return await browser.type_text(body.get("text", ""))
+
+@app.post("/api/control/key")
+async def control_key(body: dict):
+    return await browser.manual_key(body.get("key", "Enter"))
+
 @app.get("/api/attachments")
 async def list_attachments():
     return browser.list_attachments()

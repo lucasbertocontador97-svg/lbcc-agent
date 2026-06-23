@@ -289,6 +289,11 @@ class Browser:
             "value": cmd.get("value", ""),
             "wait_for": cmd.get("wait_for", ""),
         }
+        if action == "click_point":
+            step["x"] = cmd.get("x", 0)
+            step["y"] = cmd.get("y", 0)
+        if action == "type_text":
+            step["value"] = cmd.get("value", cmd.get("text", ""))
         if action == "click_text" and not step["text"]:
             step["text"] = cmd.get("selector", "")
         if action == "key":
@@ -320,7 +325,7 @@ class Browser:
             "value": payload.get("value", ""),
             "wait_for": payload.get("wait_for", ""),
         }
-        for key in ("href", "key", "ms", "file", "filename"):
+        for key in ("href", "key", "ms", "file", "filename", "x", "y"):
             if payload.get(key) not in (None, ""):
                 step[key] = payload.get(key)
         if step_type == "navigate" and not step.get("url"):
@@ -371,6 +376,32 @@ class Browser:
             raise RuntimeError("Nenhuma aba aberta")
         idx = min(self._active_idx, len(self._pages) - 1)
         return self._pages[idx]
+
+    async def _ensure_active_page(self) -> Page:
+        if self._ctx:
+            try:
+                current = list(self._ctx.pages)
+                self._pages = [p for p in current if not p.is_closed()]
+            except Exception:
+                self._ctx = None
+                self._pages = []
+        else:
+            self._pages = []
+        if not self._ctx:
+            await self._launch_context(self._profile_name, self._headless)
+        if not self._pages:
+            page = await self._ctx.new_page()
+            self._pages = [page]
+            self._setup_page_events(page)
+            await self._install_teaching_hooks(page)
+        self._active_idx = min(self._active_idx, len(self._pages) - 1)
+        page = self._pages[self._active_idx]
+        if page.is_closed():
+            page = await self._ctx.new_page()
+            self._pages[self._active_idx] = page
+            self._setup_page_events(page)
+            await self._install_teaching_hooks(page)
+        return page
 
     # ── Gerenciador de abas ────────────────────────────────────────────────────
 
@@ -533,7 +564,8 @@ class Browser:
 
             path = SCREENSHOTS_DIR / fname
             await asyncio.sleep(0.5)
-            raw = await self._page.screenshot(type="jpeg", quality=70, full_page=False)
+            page = await self._ensure_active_page()
+            raw = await page.screenshot(type="jpeg", quality=70, full_page=False)
             path.write_bytes(raw)
             b64 = base64.b64encode(raw).decode()
             return {"ok": True, "b64": b64, "path": str(path), "filename": fname}
@@ -542,6 +574,54 @@ class Browser:
             return {"ok": False, "error": str(e)}
 
     # ── Ações principais ───────────────────────────────────────────────────────
+
+    async def click_point(self, x: float, y: float) -> dict:
+        async with self._lock:
+            try:
+                page = await self._ensure_active_page()
+                size = page.viewport_size or await page.evaluate(
+                    "() => ({width: window.innerWidth, height: window.innerHeight})"
+                )
+                width = max(1, int(size.get("width") or 1))
+                height = max(1, int(size.get("height") or 1))
+                ratio_x = min(max(float(x), 0.0), 1.0)
+                ratio_y = min(max(float(y), 0.0), 1.0)
+                px = int(ratio_x * width)
+                py = int(ratio_y * height)
+                await page.mouse.click(px, py)
+                await self.wait_for_react(1200)
+                result = {"ok": True, "x": ratio_x, "y": ratio_y, "px": px, "py": py}
+                await self.record_teaching_action("click_point", {"x": ratio_x, "y": ratio_y}, result)
+                self._log("manual_click_point", {"x": ratio_x, "y": ratio_y, "px": px, "py": py})
+                return result
+            except Exception as e:
+                ss = await self.screenshot("manual_click_error")
+                self._log("manual_click_point_error", {"error": str(e)[:300], "screenshot": ss.get("filename", "")})
+                return {"ok": False, "error": str(e), "screenshot": ss.get("filename", "")}
+
+    async def type_text(self, text: str) -> dict:
+        async with self._lock:
+            try:
+                page = await self._ensure_active_page()
+                value = str(text or "")
+                await page.keyboard.type(value, delay=15)
+                await self.wait_for_react(800)
+                result = {"ok": True, "chars": len(value)}
+                await self.record_teaching_action("type_text", {"value": value}, result)
+                self._log("manual_type_text", {"chars": len(value)})
+                return result
+            except Exception as e:
+                ss = await self.screenshot("manual_type_error")
+                self._log("manual_type_text_error", {"error": str(e)[:300], "screenshot": ss.get("filename", "")})
+                return {"ok": False, "error": str(e), "screenshot": ss.get("filename", "")}
+
+    async def manual_key(self, key: str) -> dict:
+        result = await self.key(key)
+        if result.get("ok"):
+            await self.record_teaching_action("key", {"key": key}, result)
+            self._log("manual_key", {"key": key})
+            await self.wait_for_react(1000)
+        return result
 
     async def navigate(self, url: str) -> dict:
         async with self._lock:
@@ -1294,7 +1374,8 @@ class Browser:
 
     async def key(self, key: str) -> dict:
         try:
-            await self._page.keyboard.press(key)
+            page = await self._ensure_active_page()
+            await page.keyboard.press(key)
             return {"ok": True, "key": key}
         except Exception as e:
             return {"ok": False, "error": str(e)}

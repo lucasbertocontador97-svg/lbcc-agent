@@ -1108,8 +1108,12 @@ class Agent:
             return await browser.click(cmd.get("selector", ""))
         if action == "click_text":
             return await browser.click_text(cmd.get("text", ""))
+        if action == "click_point":
+            return await browser.click_point(cmd.get("x", 0), cmd.get("y", 0))
         if action == "fill":
             return await browser.fill(cmd.get("selector", ""), cmd.get("value", ""))
+        if action == "type_text":
+            return await browser.type_text(cmd.get("value", cmd.get("text", "")))
         if action == "key":
             return await browser.key(cmd.get("key", ""))
         if action == "scroll":

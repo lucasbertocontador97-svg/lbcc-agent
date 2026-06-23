@@ -425,6 +425,65 @@ function CredentialsPage() {
   );
 }
 
+function ManualViewer({ b64, teaching, onRefresh, onClick, onType, onKey }) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const clickImage = async (e) => {
+    if (!b64 || sending) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    setSending(true);
+    try { await onClick(x, y); } finally { setSending(false); }
+  };
+  const sendText = async () => {
+    if (!text || sending) return;
+    const value = text;
+    setText("");
+    setSending(true);
+    try { await onType(value); } finally { setSending(false); }
+  };
+  const pressKey = async (key) => {
+    if (sending) return;
+    setSending(true);
+    try { await onKey(key); } finally { setSending(false); }
+  };
+  return (
+    <div className="manual-viewer">
+      <div className="manual-viewer-bar">
+        <div>
+          <strong>Controle manual</strong>
+          {teaching?.active && <span>{teaching.name || "procedimento ativo"}</span>}
+        </div>
+        <button className="btn-sm" onClick={onRefresh} disabled={sending}>Atualizar</button>
+      </div>
+      <div className="manual-screen" onClick={clickImage}>
+        {b64 ? (
+          <img src={`data:image/jpeg;base64,${b64}`} alt="Tela do navegador" />
+        ) : (
+          <button className="btn-sm" onClick={(e)=>{e.stopPropagation();onRefresh();}}>
+            Carregar tela
+          </button>
+        )}
+      </div>
+      <div className="manual-controls">
+        <input
+          className="manual-type-input"
+          value={text}
+          onChange={e=>setText(e.target.value)}
+          onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); sendText(); } }}
+          placeholder="Texto para digitar na tela"
+          disabled={sending}
+        />
+        <button className="btn-sm" onClick={sendText} disabled={!text || sending}>Digitar</button>
+        <button className="btn-sm" onClick={()=>pressKey("Enter")} disabled={sending}>Enter</button>
+        <button className="btn-sm" onClick={()=>pressKey("Tab")} disabled={sending}>Tab</button>
+        <button className="btn-sm" onClick={()=>pressKey("Escape")} disabled={sending}>Esc</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [page, setPage]           = useState("chat");
   const [convs, setConvs]         = useState([]);
@@ -551,7 +610,12 @@ export default function App() {
   const doReject  = () => { setApprovalPending(false); send({type:"reject"}); };
   const doNextStep = () => { setStepWaiting(false); send({type:"next_step"}); };
   const toggleStep = () => { const n=!stepMode; setStepMode(n); send({type:n?"step_mode_on":"step_mode_off"}); };
-  const toggleManual = () => { send({type:manualMode?"manual_off":"manual_on"}); setManualMode(v=>!v); };
+  const toggleManual = () => {
+    const next = !manualMode;
+    send({type:manualMode?"manual_off":"manual_on"});
+    setManualMode(next);
+    if (next) setTimeout(() => refreshManualShot(), 250);
+  };
   const startTeach = async () => {
     const stamp = new Date().toISOString().replace(/[-:T.]/g, "").slice(0, 14);
     const name = `procedimento_${stamp}`;
@@ -560,6 +624,7 @@ export default function App() {
       setTeaching({active:true, name:result.name || name, steps_count:0});
       setManualMode(true);
       setEvents(prev => [...prev, {type:"system", text:`Modo ensinar ativo: ${result.name || name}`}]);
+      setTimeout(() => refreshManualShot(), 250);
     } catch {
       send({type:"teach_start", name, description:`Procedimento ensinado: ${name}`});
     }
@@ -578,6 +643,34 @@ export default function App() {
   const switchTab = (i) => send({type:"switch_tab",index:i});
   const closeTab  = (i) => send({type:"close_tab",index:i});
   const newTab    = () => send({type:"new_tab",url:""});
+
+  const refreshManualShot = useCallback(async () => {
+    const shot = await api.controlShot().catch(() => null);
+    if (shot?.ok && shot.b64) setLastScreenshot(shot.b64);
+    return shot;
+  }, []);
+
+  const manualClick = async (x, y) => {
+    await api.controlClick({x, y});
+    await refreshManualShot();
+  };
+
+  const manualType = async (text) => {
+    await api.controlType({text});
+    await refreshManualShot();
+  };
+
+  const manualKey = async (key) => {
+    await api.controlKey({key});
+    await refreshManualShot();
+  };
+
+  useEffect(() => {
+    if (page !== "chat" || !(manualMode || teaching.active)) return;
+    refreshManualShot();
+    const t = setInterval(refreshManualShot, 2500);
+    return () => clearInterval(t);
+  }, [page, manualMode, teaching.active, refreshManualShot]);
 
   const NAV = [
     {id:"chat",label:"💬 Chat"},
@@ -673,6 +766,16 @@ export default function App() {
          page==="credentials"? <CredentialsPage /> :
          <>
            <div className="messages">
+             {(manualMode || teaching.active) && (
+               <ManualViewer
+                 b64={lastScreenshot}
+                 teaching={teaching}
+                 onRefresh={refreshManualShot}
+                 onClick={manualClick}
+                 onType={manualType}
+                 onKey={manualKey}
+               />
+             )}
              {events.length===0 && !busy && (
                <div className="welcome">
                  <div className="welcome-icon">⚡</div>
