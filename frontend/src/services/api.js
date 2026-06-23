@@ -1,5 +1,6 @@
 const get  = p => fetch(p).then(r => { if(!r.ok) throw new Error(r.statusText); return r.json(); });
 const post = (p,b) => fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)}).then(r=>{if(!r.ok)throw new Error(r.statusText);return r.json();});
+const del  = p => fetch(p,{method:"DELETE"}).then(r=>{if(!r.ok)throw new Error(r.statusText);return r.json();});
 
 export const api = {
   status:          ()    => get("/api/status"),
@@ -14,6 +15,9 @@ export const api = {
   listVideos:      ()    => get("/api/videos"),
   listFiles:       ()    => get("/api/files"),
   listAttachments: ()    => get("/api/attachments"),
+  listCredentials: ()    => get("/api/credentials"),
+  saveCredential:  (b)   => post("/api/credentials", b),
+  deleteCredential:(a)   => del(`/api/credentials/${encodeURIComponent(a)}`),
   listTabs:        ()    => get("/api/tabs"),
   listLogs:        ()    => get("/api/logs"),
 };

@@ -288,6 +288,133 @@ function FilesPage() {
 }
 
 // ── App Principal ─────────────────────────────────────────────────────────────
+function CredentialsPage() {
+  const emptyForm = { alias: "", label: "", url: "", email: "", password: "", aliases: "" };
+  const [items, setItems] = useState([]);
+  const [path, setPath] = useState("");
+  const [form, setForm] = useState(emptyForm);
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const load = () => api.listCredentials().then(data => {
+    setItems(data.credentials || []);
+    setPath(data.path || "");
+  }).catch(() => setMessage("Nao consegui carregar as credenciais."));
+
+  useEffect(() => { load(); }, []);
+
+  const setField = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
+  const edit = (item) => {
+    setEditing(item.alias);
+    setForm({
+      alias: item.alias,
+      label: item.label || item.alias,
+      url: item.url || "",
+      email: item.email || "",
+      password: "",
+      aliases: (item.aliases || []).join(", "),
+    });
+    setMessage("");
+  };
+  const reset = () => { setEditing(null); setForm(emptyForm); setMessage(""); };
+  const save = async (e) => {
+    e.preventDefault();
+    if (!form.alias.trim()) { setMessage("Informe um apelido."); return; }
+    setSaving(true);
+    setMessage("");
+    try {
+      await api.saveCredential(form);
+      await load();
+      setEditing(null);
+      setForm(emptyForm);
+      setMessage("Credencial salva.");
+    } catch {
+      setMessage("Nao consegui salvar a credencial.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const remove = async (alias) => {
+    if (!confirm(`Apagar credencial "${alias}"?`)) return;
+    await api.deleteCredential(alias);
+    if (editing === alias) reset();
+    load();
+  };
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <h2>Credenciais</h2>
+        <span className="page-sub">{items.length} salvas</span>
+      </div>
+      <div className="credentials-layout">
+        <form className="credential-form" onSubmit={save}>
+          <div className="form-grid">
+            <label className="field">
+              <span>Apelido</span>
+              <input value={form.alias} onChange={e=>setField("alias", e.target.value)}
+                     placeholder="iob, hublbcc, dominio.com" disabled={!!editing} />
+            </label>
+            <label className="field">
+              <span>Nome</span>
+              <input value={form.label} onChange={e=>setField("label", e.target.value)}
+                     placeholder="IOB Online" />
+            </label>
+            <label className="field wide">
+              <span>URL</span>
+              <input value={form.url} onChange={e=>setField("url", e.target.value)}
+                     placeholder="https://..." />
+            </label>
+            <label className="field">
+              <span>Email ou usuario</span>
+              <input value={form.email} onChange={e=>setField("email", e.target.value)}
+                     autoComplete="username" placeholder="usuario@empresa.com" />
+            </label>
+            <label className="field">
+              <span>Senha</span>
+              <input type="password" value={form.password}
+                     onChange={e=>setField("password", e.target.value)}
+                     autoComplete="new-password"
+                     placeholder={editing ? "manter senha atual" : "senha"} />
+            </label>
+            <label className="field wide">
+              <span>Outros nomes</span>
+              <input value={form.aliases} onChange={e=>setField("aliases", e.target.value)}
+                     placeholder="folha, portal, login" />
+            </label>
+          </div>
+          <div className="credential-actions">
+            <button className="btn-approve" type="submit" disabled={saving}>
+              {saving ? "Salvando..." : editing ? "Atualizar" : "Salvar"}
+            </button>
+            {editing && <button className="btn-cancel" type="button" onClick={reset}>Cancelar</button>}
+            {message && <span className="credential-message">{message}</span>}
+          </div>
+          {path && <div className="credential-path">{path}</div>}
+        </form>
+
+        <div className="credential-list">
+          {items.length===0 && <div className="empty">Nenhuma credencial salva.</div>}
+          {items.map(item => (
+            <div key={item.alias} className="credential-item">
+              <div className="credential-main" onClick={()=>edit(item)}>
+                <div className="credential-title">{item.label || item.alias}</div>
+                <div className="credential-meta">{item.alias} {item.url ? `- ${item.url}` : ""}</div>
+                <div className="credential-meta">{item.email || "sem usuario"} - {item.password_set ? "senha salva" : "sem senha"}</div>
+              </div>
+              <div className="credential-actions-row">
+                <button className="btn-sm" onClick={()=>edit(item)}>Editar</button>
+                <button className="btn-sm danger" onClick={()=>remove(item.alias)}>Apagar</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [page, setPage]           = useState("chat");
   const [convs, setConvs]         = useState([]);
@@ -409,6 +536,7 @@ export default function App() {
     {id:"executions",label:"⚡ Execuções"},
     {id:"media",label:"🖼️ Mídia"},
     {id:"files",label:"📁 Arquivos"},
+    {id:"credentials",label:"Credenciais"},
   ];
 
   return (
@@ -489,6 +617,7 @@ export default function App() {
          page==="executions" ? <ExecutionsPage /> :
          page==="media"      ? <MediaPage /> :
          page==="files"      ? <FilesPage /> :
+         page==="credentials"? <CredentialsPage /> :
          <>
            <div className="messages">
              {events.length===0 && !busy && (

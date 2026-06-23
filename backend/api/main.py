@@ -17,6 +17,38 @@ from backend.db import database as db
 from backend.procedures import manager as procs
 
 FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend" / "dist"
+CREDENTIALS_PATH = Path(os.getenv(
+    "CREDENTIALS_FILE",
+    str(Path(__file__).parent.parent / "data" / "credentials.json")
+))
+
+
+def _read_credentials_file() -> dict:
+    if not CREDENTIALS_PATH.exists():
+        return {"sites": {}}
+    try:
+        data = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("sites"), dict):
+            return data
+    except Exception:
+        pass
+    return {"sites": {}}
+
+
+def _write_credentials_file(data: dict):
+    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CREDENTIALS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _safe_credential(alias: str, item: dict) -> dict:
+    return {
+        "alias": alias,
+        "label": item.get("label", alias),
+        "url": item.get("url", ""),
+        "email": item.get("email", ""),
+        "password_set": bool(item.get("password")),
+        "aliases": item.get("aliases", []),
+    }
 
 
 @asynccontextmanager
@@ -312,6 +344,59 @@ async def delete_procedure(name: str):
     return {"deleted": True}
 
 # ── Anexos ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/credentials")
+async def list_credentials():
+    data = _read_credentials_file()
+    sites = data.get("sites", {})
+    return {
+        "path": str(CREDENTIALS_PATH),
+        "credentials": [
+            _safe_credential(alias, item)
+            for alias, item in sorted(sites.items())
+            if isinstance(item, dict)
+        ],
+    }
+
+@app.post("/api/credentials")
+async def save_credential(body: dict):
+    alias = "".join(
+        c for c in body.get("alias", "").lower().strip()
+        if c.isalnum() or c in ("-", "_", ".")
+    )
+    if not alias:
+        raise HTTPException(400, "alias obrigatorio")
+
+    data = _read_credentials_file()
+    sites = data.setdefault("sites", {})
+    existing = sites.get(alias, {}) if isinstance(sites.get(alias, {}), dict) else {}
+
+    aliases = body.get("aliases", existing.get("aliases", []))
+    if isinstance(aliases, str):
+        aliases = [a.strip() for a in aliases.split(",") if a.strip()]
+    if not isinstance(aliases, list):
+        aliases = []
+
+    password = body.get("password", "")
+    sites[alias] = {
+        "label": body.get("label", existing.get("label", alias)),
+        "url": body.get("url", existing.get("url", "")),
+        "email": body.get("email", existing.get("email", "")),
+        "password": password if password else existing.get("password", ""),
+        "aliases": aliases,
+    }
+    _write_credentials_file(data)
+    return _safe_credential(alias, sites[alias])
+
+@app.delete("/api/credentials/{alias}")
+async def delete_credential(alias: str):
+    data = _read_credentials_file()
+    sites = data.setdefault("sites", {})
+    if alias not in sites:
+        raise HTTPException(404)
+    del sites[alias]
+    _write_credentials_file(data)
+    return {"deleted": True}
 
 @app.get("/api/attachments")
 async def list_attachments():

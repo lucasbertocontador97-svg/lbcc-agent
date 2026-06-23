@@ -609,3 +609,119 @@ textarea::placeholder { color: var(--text3); }
   border-radius: 6px; flex-shrink: 0;
 }
 .tab-new:hover { background: var(--surface); color: var(--text); }
+
+/* Credentials */
+.credentials-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(320px, 520px) minmax(280px, 1fr);
+  gap: 16px;
+  padding: 16px;
+  overflow: hidden;
+}
+.credential-form,
+.credential-list {
+  min-width: 0;
+  overflow-y: auto;
+}
+.credential-form {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  height: fit-content;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.field.wide { grid-column: 1 / -1; }
+.field span {
+  color: var(--text2);
+  font-size: 12px;
+}
+.field input {
+  width: 100%;
+  height: 38px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  padding: 0 10px;
+  font: 13px var(--sans);
+  outline: none;
+}
+.field input:focus { border-color: var(--accent); }
+.field input:disabled {
+  color: var(--text3);
+  cursor: not-allowed;
+}
+.credential-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.credential-message {
+  color: var(--text2);
+  font-size: 12px;
+}
+.credential-path {
+  margin-top: 12px;
+  color: var(--text3);
+  font: 11px var(--mono);
+  word-break: break-all;
+}
+.credential-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.credential-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+.credential-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+.credential-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.credential-meta {
+  color: var(--text3);
+  font-size: 12px;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.credential-actions-row {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.btn-sm.danger { color: var(--red); }
+
+@media (max-width: 860px) {
+  .credentials-layout {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+  .credential-list { overflow: visible; }
+}
