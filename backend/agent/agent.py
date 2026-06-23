@@ -18,10 +18,10 @@ from backend.browser.browser import browser
 from backend.db import database as db
 from backend.procedures import manager as procs
 
-TIMEOUT_SECONDS = 180
-MAX_RETRIES     = 3
-RETRY_DELAY_S   = 2
-ACTION_TIMEOUT_SECONDS = 35
+TIMEOUT_SECONDS = 75
+MAX_RETRIES     = 2
+RETRY_DELAY_S   = 1
+ACTION_TIMEOUT_SECONDS = 14
 IOB_PROFILE = "iob"
 IOB_URL = os.getenv("IOB_URL", "https://www.iobonline.com.br/")
 CREDENTIALS_FILE = Path(__file__).parent.parent / "data" / "credentials.json"
@@ -902,7 +902,8 @@ class Agent:
             label = f"fill_{cmd.get('selector','')[:20]}"
 
         result = {"ok": False, "error": "Nao executado"}
-        for attempt in range(MAX_RETRIES):
+        action_retries = 1 if action in ("click", "click_text", "fill") else MAX_RETRIES
+        for attempt in range(action_retries):
             if browser.should_stop:
                 yield {"type": "stopped", "text": "Execucao interrompida."}
                 return
@@ -918,8 +919,8 @@ class Agent:
 
             if result.get("ok"):
                 break
-            if attempt < MAX_RETRIES - 1:
-                yield {"type": "retry", "text": f"Retry {attempt+1}/{MAX_RETRIES}: {result.get('error','falha')}"}
+            if attempt < action_retries - 1:
+                yield {"type": "retry", "text": f"Retry {attempt+1}/{action_retries}: {result.get('error','falha')}"}
                 await asyncio.sleep(RETRY_DELAY_S)
 
         if action == "download" and result.get("ok"):

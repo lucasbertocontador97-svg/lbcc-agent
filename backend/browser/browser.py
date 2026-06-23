@@ -420,7 +420,7 @@ class Browser:
 
             return {"ok": False, "error": last_error[:200]}
 
-    async def click_text(self, text: str, timeout: int = 10000) -> dict:
+    async def click_text(self, text: str, timeout: int = 4500) -> dict:
         async with self._lock:
             wanted = (text or "").strip()
             if not wanted:
@@ -462,13 +462,13 @@ class Browser:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
-    async def wait_for_react(self, timeout: int = 2500) -> dict:
+    async def wait_for_react(self, timeout: int = 800) -> dict:
         try:
             await self._page.wait_for_load_state("domcontentloaded", timeout=timeout)
         except Exception:
             pass
         try:
-            await self._page.wait_for_load_state("networkidle", timeout=min(timeout, 1500))
+            await self._page.wait_for_load_state("networkidle", timeout=min(timeout, 600))
         except Exception:
             pass
         try:
@@ -495,7 +495,7 @@ class Browser:
                     timer = setTimeout(() => finish(true), stableMs);
                     setTimeout(() => finish(false), maxMs);
                 })""",
-                {"stableMs": 350, "maxMs": timeout},
+                {"stableMs": 180, "maxMs": timeout},
             )
             self._log("wait_for_react", {"stable": bool(stable), "timeout": timeout})
             return {"ok": True, "stable": bool(stable)}
@@ -573,6 +573,15 @@ class Browser:
             except Exception:
                 return ""
 
+    def _values_match(self, expected: str, actual: str) -> bool:
+        if actual == expected:
+            return True
+        expected_digits = re.sub(r"\D", "", expected or "")
+        actual_digits = re.sub(r"\D", "", actual or "")
+        if expected_digits and expected_digits == actual_digits:
+            return True
+        return False
+
     def _selector_attempts(self, selector: str) -> list[str]:
         if selector.startswith(("role=", "text=", ":")):
             return [selector]
@@ -605,6 +614,8 @@ class Browser:
 
     def _fill_selector_attempts(self, selector: str) -> list[str]:
         attempts = [selector]
+        if selector.startswith(("#", ".", "[")):
+            return attempts
         words = self._selector_hint_words(selector)
         for word in words:
             value = self._css_value(word)
@@ -638,7 +649,9 @@ class Browser:
                         return style && style.visibility !== 'hidden'
                             && style.display !== 'none'
                             && rect.width > 4
-                            && rect.height > 4;
+                            && rect.height > 4
+                            && rect.width < window.innerWidth * 0.9
+                            && rect.height < window.innerHeight * 0.6;
                     };
                     let best = null;
                     let bestScore = 0;
@@ -647,6 +660,7 @@ class Browser:
                         const haystack = normalize([
                             el.getAttribute('placeholder'),
                             el.getAttribute('aria-label'),
+                            el.getAttribute('type'),
                             el.getAttribute('name'),
                             el.getAttribute('id'),
                             el.getAttribute('class'),
@@ -723,9 +737,14 @@ class Browser:
                         const score = wanted.reduce((total, word) => (
                             total + (haystack.includes(word) ? 1 : 0)
                         ), 0);
-                        if (score > bestScore) {
+                        const tag = el.tagName.toLowerCase();
+                        const bonus = ['button', 'a', 'input', 'select', 'textarea'].includes(tag)
+                            || el.getAttribute('role')
+                            ? 0.5
+                            : 0;
+                        if (score + bonus > bestScore) {
                             best = el;
-                            bestScore = score;
+                            bestScore = score + bonus;
                         }
                     }
                     if (!best || bestScore === 0) return '';
@@ -753,7 +772,7 @@ class Browser:
     async def click(self, selector: str) -> dict:
         return await self.safe_click(selector)
 
-    async def safe_click(self, selector: str, timeout: int = 12000, retries: int = 2) -> dict:
+    async def safe_click(self, selector: str, timeout: int = 4500, retries: int = 1) -> dict:
         async with self._lock:
             last_error = ""
             for attempt_no in range(1, retries + 1):
@@ -765,7 +784,7 @@ class Browser:
                 for sel in candidates:
                     try:
                         locator = self._page.locator(sel).first
-                        candidate_timeout = min(timeout, 3500) if sel == selector and len(candidates) > 1 else timeout
+                        candidate_timeout = min(timeout, 1800) if sel == selector and len(candidates) > 1 else timeout
                         await locator.wait_for(state="attached", timeout=candidate_timeout)
                         self._log("safe_click", {"selector": sel, "step": "elemento_encontrado", "attempt": attempt_no})
                         await locator.scroll_into_view_if_needed(timeout=candidate_timeout)
@@ -779,16 +798,17 @@ class Browser:
                         if overlay.get("blocked"):
                             self._log("safe_click", {"selector": sel, "step": "overlay_detectado", "overlay": overlay})
                         await self.highlight_element(locator, f"click:{sel[:60]}")
-                        await locator.hover(timeout=timeout)
+                        if not overlay.get("blocked"):
+                            await locator.hover(timeout=min(timeout, 1200))
                         try:
-                            await locator.click(timeout=timeout)
+                            await locator.click(timeout=min(timeout, 2500))
                         except Exception as normal_error:
                             self._log("safe_click", {
                                 "selector": sel,
                                 "step": "click_normal_falhou_force",
                                 "error": str(normal_error)[:250],
                             })
-                            await locator.click(timeout=timeout, force=True)
+                            await locator.click(timeout=min(timeout, 2500), force=True)
                         await self.wait_for_react()
                         self._log("safe_click", {"selector": sel, "step": "click_ok", "attempt": attempt_no})
                         return {"ok": True, "selector": sel, "attempt": attempt_no, "overlay": overlay}
@@ -847,15 +867,15 @@ class Browser:
         if overlay.get("blocked"):
             self._log("safe_fill", {"selector": selector, "step": "overlay_detectado", "overlay": overlay})
         await self.highlight_element(locator, f"fill:{selector[:60]}")
-        await locator.click(timeout=timeout)
+        await locator.click(timeout=min(timeout, 1800))
         try:
-            await locator.fill("", timeout=timeout)
+            await locator.fill("", timeout=min(timeout, 1800))
         except Exception:
             await self._page.keyboard.press("Control+A")
             await self._page.keyboard.press("Backspace")
-        await locator.fill(value, timeout=timeout)
+        await locator.fill(value, timeout=min(timeout, 2200))
         filled = await self._locator_value(locator)
-        if filled != value:
+        if not self._values_match(value, filled):
             self._log("safe_fill", {
                 "selector": selector,
                 "step": "valor_divergente",
@@ -874,7 +894,7 @@ class Browser:
         await self.wait_for_react()
         return {"ok": True, "selector": selector, "value_len": len(value), "attempt": attempt_no}
 
-    async def safe_fill(self, selector: str, value: str, timeout: int = 12000, retries: int = 2) -> dict:
+    async def safe_fill(self, selector: str, value: str, timeout: int = 4500, retries: int = 1) -> dict:
         async with self._lock:
             last_error = ""
             for attempt_no in range(1, retries + 1):
@@ -885,7 +905,7 @@ class Browser:
                     candidates.append(fallback)
                 for candidate in candidates:
                     try:
-                        candidate_timeout = min(timeout, 3500) if candidate == selector and len(candidates) > 1 else timeout
+                        candidate_timeout = min(timeout, 1500) if candidate == selector and len(candidates) > 1 else min(timeout, 2600)
                         result = await self._safe_fill_selector_once(candidate, value, candidate_timeout, attempt_no)
                         if candidate != selector:
                             result["original_selector"] = selector
