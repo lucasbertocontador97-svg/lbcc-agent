@@ -63,6 +63,19 @@ wsm = WsManager()
 @app.websocket("/ws/{sid}")
 async def websocket(ws: WebSocket, sid: str):
     await wsm.connect(sid, ws)
+
+    # Notificar downloads em tempo real
+    async def on_download(info: dict):
+        await wsm.send(sid, {
+            "type": "download",
+            "filename": info["filename"],
+            "path": info["path"],
+            "size": info["size"],
+            "url": info["url"],
+            "text": f"📥 Download salvo: {info['filename']} ({info['size']//1024}KB) → Arquivos > Downloads",
+        })
+    browser._download_callbacks.append(on_download)
+
     try:
         while True:
             raw = await ws.receive_text()
@@ -129,6 +142,12 @@ async def websocket(ws: WebSocket, sid: str):
     except Exception as e:
         print(f"[ws] erro: {e}")
         wsm.disconnect(sid)
+    finally:
+        # Remover callback de download
+        try:
+            browser._download_callbacks.remove(on_download)
+        except Exception:
+            pass
 
 
 async def _handle_chat(sid: str, msg: dict):

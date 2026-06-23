@@ -126,9 +126,22 @@ class Browser:
         name = download.suggested_filename
         dest = DOWNLOADS_DIR / name
         await download.save_as(str(dest))
-        self.last_downloads.append(str(dest))
-        self._log("download", {"filename": name, "path": str(dest)})
-        print(f"[browser] Download: {dest}")
+        size = dest.stat().st_size if dest.exists() else 0
+        info = {
+            "filename": name,
+            "path": str(dest),
+            "size": size,
+            "url": f"/api/files/{name}",
+        }
+        self.last_downloads.append(info)
+        self._log("download", info)
+        print(f"[browser] Download: {dest} ({size} bytes)")
+        # Notificar callbacks registrados
+        for cb in self._download_callbacks:
+            try:
+                await cb(info)
+            except Exception:
+                pass
 
     # ── Logging ────────────────────────────────────────────────────────────────
 

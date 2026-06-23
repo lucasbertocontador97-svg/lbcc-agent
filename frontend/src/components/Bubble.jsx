@@ -120,6 +120,34 @@ export function Bubble({ event, onApprove, onCancel }) {
     );
   }
 
+  if (type === "download") return (
+    <div className="msg-row">
+      <div className="avatar bot" style={{ opacity:.7 }}>🤖</div>
+      <div className="bubble bot" style={{ borderColor:"rgba(34,197,94,.3)" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:20 }}>📥</span>
+          <div>
+            <div style={{ fontWeight:600, color:"var(--green)" }}>Download concluído!</div>
+            <div style={{ fontSize:12, color:"var(--text2)", marginTop:2 }}>
+              <strong>{event.filename}</strong>
+              {event.size && <span> · {(event.size/1024).toFixed(1)} KB</span>}
+            </div>
+            <div style={{ fontSize:11, color:"var(--text3)", marginTop:4 }}>
+              Salvo em: <code style={{ fontFamily:"var(--mono)" }}>data/downloads/{event.filename}</code>
+            </div>
+            {event.url && (
+              <a href={event.url} download={event.filename}
+                 style={{ display:"inline-block", marginTop:6, fontSize:12,
+                          color:"var(--accent)", textDecoration:"underline" }}>
+                ↓ Baixar para seu computador
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   if (type === "system") return <div className="sys-msg">{event.text}</div>;
 
   return null;
