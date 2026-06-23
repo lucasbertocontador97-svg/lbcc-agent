@@ -4,9 +4,12 @@ Agente — Fase 3: abas, downloads, uploads, login persistente.
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
+from pathlib import Path
 from typing import AsyncGenerator, Optional
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
@@ -20,6 +23,7 @@ RETRY_DELAY_S   = 2
 ACTION_TIMEOUT_SECONDS = 35
 IOB_PROFILE = "iob"
 IOB_URL = os.getenv("IOB_URL", "https://www.iobonline.com.br/")
+CREDENTIALS_FILE = Path(__file__).parent.parent / "data" / "credentials.json"
 
 SYSTEM = """Você é o Agente Operacional LBCC.
 Você controla um navegador Chrome real. Cookies e logins são mantidos entre sessões.
@@ -84,6 +88,7 @@ class Agent:
         self._iob_url = os.getenv("IOB_URL", IOB_URL)
         self._iob_email = os.getenv("IOB_EMAIL", "")
         self._iob_password = os.getenv("IOB_PASSWORD", "")
+        self._credentials_file = Path(os.getenv("CREDENTIALS_FILE", str(CREDENTIALS_FILE)))
 
     async def run(
         self,
@@ -99,7 +104,7 @@ class Agent:
 
         iob_command = self._classify_iob_command(user_message)
         if iob_command:
-            async for event in self._run_iob_command(iob_command, conv_id, exec_id):
+            async for event in self._run_iob_command(iob_command, conv_id, exec_id, user_message):
                 yield event
             return
 
@@ -212,18 +217,25 @@ class Agent:
             return None
         if "abrir" in m and "iob" in m:
             return "open_iob"
-        if "login" in m:
+        if "login" in m and "iob" in m:
             return "login_iob"
+        if "login" in m:
+            return "generic_login"
         if "folha" in m:
             return "go_payroll"
         return None
 
     async def _run_iob_command(
-        self, command: str, conv_id: str, exec_id: str
+        self, command: str, conv_id: str, exec_id: str, user_message: str = ""
     ) -> AsyncGenerator[dict, None]:
         if command == "stop":
             browser.request_stop()
             yield {"type": "stopped", "text": "Execucao interrompida."}
+            return
+
+        if command == "generic_login":
+            async for event in self._run_generic_login(user_message, conv_id, exec_id):
+                yield event
             return
 
         profile = await browser.use_profile(IOB_PROFILE)
@@ -343,6 +355,103 @@ class Agent:
             yield {"type": "context", "context": final_context}
             yield {"type": "done", "text": "Tela de Folha registrada para observacao."}
 
+    async def _run_generic_login(
+        self, user_message: str, conv_id: str, exec_id: str
+    ) -> AsyncGenerator[dict, None]:
+        target = self._extract_login_target(user_message)
+        credential = await self._find_credential(target)
+        if not credential:
+            context = await browser.get_page_context()
+            target = self._host_alias(context.get("url", ""))
+            credential = await self._find_credential(target)
+
+        if not credential:
+            yield {
+                "type": "ask",
+                "text": (
+                    "Nao encontrei credenciais locais para este site. Cadastre em "
+                    "backend/data/credentials.json e tente de novo."
+                ),
+            }
+            approved = await browser.request_approval("Cadastre credenciais locais e aprove para tentar novamente.")
+            if not approved:
+                yield {"type": "stopped", "text": "Login interrompido."}
+                return
+            credential = await self._find_credential(target)
+            if not credential:
+                yield {"type": "error", "text": "Credenciais locais ainda nao encontradas."}
+                return
+
+        label = credential.get("label") or credential.get("alias") or "site"
+        url = credential.get("url", "")
+        if url:
+            async for event in self._execute_cmd({"action": "navigate", "url": url}, conv_id, exec_id):
+                yield event
+
+        context = await browser.get_page_context()
+        yield {"type": "context", "context": context}
+        if self._looks_logged_in(context):
+            yield {"type": "done", "text": f"Login de {label} ja parece ativo."}
+            return
+
+        for text in ("Entrar", "Login", "Acessar", "Minha conta", "Sign in", "Log in"):
+            result_seen = False
+            async for event in self._execute_cmd({"action": "click_text", "text": text}, conv_id, exec_id):
+                yield event
+                if event.get("type") == "result" and event.get("ok"):
+                    result_seen = True
+            if result_seen:
+                break
+
+        yield {"type": "system", "text": f"Credenciais locais encontradas para {label}. Tentando login automatico."}
+        ss_before = await browser.screenshot("before_generic_login_credentials")
+        if ss_before.get("ok") and ss_before.get("b64"):
+            yield {"type": "screenshot", "b64": ss_before["b64"], "label": f"Antes: login {label}"}
+
+        result = await browser.fill_login_credentials(credential.get("email", ""), credential.get("password", ""))
+        safe_result = {
+            **result,
+            "email": self._mask_email(credential.get("email", "")),
+            "password_set": bool(credential.get("password")),
+            "credential": label,
+        }
+        yield {"type": "result", **safe_result}
+        await db.save_action_log(
+            str(uuid.uuid4()), conv_id, exec_id,
+            "generic_login_credentials",
+            {
+                "credential": label,
+                "email": self._mask_email(credential.get("email", "")),
+                "password_set": bool(credential.get("password")),
+            },
+            safe_result,
+            result.get("ok", False),
+        )
+
+        ss_after = await browser.screenshot("after_generic_login_credentials")
+        if ss_after.get("ok") and ss_after.get("b64"):
+            yield {"type": "screenshot", "b64": ss_after["b64"], "label": f"Depois: login {label}"}
+
+        await browser.wait(1500)
+        context = await browser.get_page_context()
+        yield {"type": "context", "context": context}
+        if self._looks_logged_in(context):
+            yield {"type": "done", "text": f"Login de {label} confirmado com credenciais locais."}
+            return
+
+        yield {
+            "type": "ask",
+            "text": (
+                f"Login automatico de {label} nao foi confirmado. "
+                "Conclua manualmente no navegador e aprove quando terminar."
+            ),
+        }
+        approved = await browser.request_approval(f"Conclua manualmente o login de {label}.")
+        if not approved:
+            yield {"type": "stopped", "text": f"Login de {label} interrompido."}
+            return
+        yield {"type": "done", "text": f"Login de {label} registrado no perfil persistente."}
+
     def _looks_logged_in(self, context: dict) -> bool:
         haystack = " ".join(
             [context.get("url", ""), context.get("title", "")]
@@ -351,6 +460,94 @@ class Agent:
             + context.get("menus", [])
         ).lower()
         return any(token in haystack for token in ("sair", "logout", "minha conta", "folha", "dashboard"))
+
+    def _extract_login_target(self, message: str) -> str:
+        m = message.lower().strip()
+        patterns = [
+            r"login\s+(?:no|na|em|do|da)\s+([\w\.-]+)",
+            r"entrar\s+(?:no|na|em|do|da)\s+([\w\.-]+)",
+            r"acessar\s+(?:no|na|em|do|da)\s+([\w\.-]+)",
+        ]
+        for pattern in patterns:
+            found = re.search(pattern, m)
+            if found:
+                return self._normalize_alias(found.group(1))
+        return ""
+
+    async def _find_credential(self, target: str) -> Optional[dict]:
+        credentials = self._load_credentials()
+        aliases = []
+        if target:
+            aliases.append(self._normalize_alias(target))
+
+        context = await browser.get_page_context()
+        current_host = self._host_alias(context.get("url", ""))
+        if current_host:
+            aliases.append(current_host)
+
+        for alias in aliases:
+            for item in credentials:
+                item_aliases = [self._normalize_alias(a) for a in item.get("aliases", [])]
+                item_aliases.append(self._normalize_alias(item.get("alias", "")))
+                item_aliases.append(self._host_alias(item.get("url", "")))
+                if alias and any(
+                    alias == item_alias or
+                    alias in item_alias or
+                    item_alias in alias
+                    for item_alias in item_aliases
+                    if item_alias
+                ):
+                    return item
+
+        return None
+
+    def _load_credentials(self) -> list[dict]:
+        items = []
+
+        if self._credentials_file.exists():
+            try:
+                data = json.loads(self._credentials_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    sites = data.get("sites", {})
+                    if isinstance(sites, dict):
+                        for alias, value in sites.items():
+                            if isinstance(value, dict):
+                                items.append({"alias": alias, **value})
+                    elif isinstance(sites, list):
+                        items.extend([item for item in sites if isinstance(item, dict)])
+                elif isinstance(data, list):
+                    items.extend([item for item in data if isinstance(item, dict)])
+            except Exception:
+                pass
+
+        if self._iob_email and self._iob_password:
+            items.append({
+                "alias": "iob",
+                "label": "IOB",
+                "url": self._iob_url,
+                "email": self._iob_email,
+                "password": self._iob_password,
+                "aliases": ["iob", "iobonline"],
+            })
+
+        return [
+            item for item in items
+            if item.get("email") and item.get("password")
+        ]
+
+    def _normalize_alias(self, value: str) -> str:
+        value = (value or "").lower().strip()
+        value = value.replace("https://", "").replace("http://", "")
+        value = value.split("/")[0]
+        value = value.removeprefix("www.")
+        return re.sub(r"[^a-z0-9.-]+", "", value)
+
+    def _host_alias(self, url: str) -> str:
+        try:
+            host = urlparse(url).netloc or url
+            return self._normalize_alias(host)
+        except Exception:
+            return ""
 
     def _mask_email(self, email: str) -> str:
         if "@" not in email:

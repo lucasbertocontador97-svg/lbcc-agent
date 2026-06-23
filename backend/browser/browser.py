@@ -464,7 +464,7 @@ class Browser:
     async def fill_login_credentials(self, email: str, password: str, submit: bool = True) -> dict:
         async with self._lock:
             if not email or not password:
-                return {"ok": False, "error": "IOB_EMAIL ou IOB_PASSWORD ausente no .env"}
+                return {"ok": False, "error": "Email ou senha ausente nas credenciais locais"}
 
             email_selectors = [
                 "input[type='email']",
