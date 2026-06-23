@@ -461,6 +461,267 @@ class Browser:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
+    async def wait_for_react(self, timeout: int = 2500) -> dict:
+        try:
+            await self._page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        except Exception:
+            pass
+        try:
+            await self._page.wait_for_load_state("networkidle", timeout=min(timeout, 1500))
+        except Exception:
+            pass
+        try:
+            stable = await self._page.evaluate(
+                """({stableMs, maxMs}) => new Promise(resolve => {
+                    let done = false;
+                    let timer = null;
+                    const finish = (ok) => {
+                        if (done) return;
+                        done = true;
+                        try { observer.disconnect(); } catch (_) {}
+                        clearTimeout(timer);
+                        resolve(ok);
+                    };
+                    const observer = new MutationObserver(() => {
+                        clearTimeout(timer);
+                        timer = setTimeout(() => finish(true), stableMs);
+                    });
+                    observer.observe(document.body || document.documentElement, {
+                        childList: true,
+                        subtree: true,
+                        attributes: true
+                    });
+                    timer = setTimeout(() => finish(true), stableMs);
+                    setTimeout(() => finish(false), maxMs);
+                })""",
+                {"stableMs": 350, "maxMs": timeout},
+            )
+            self._log("wait_for_react", {"stable": bool(stable), "timeout": timeout})
+            return {"ok": True, "stable": bool(stable)}
+        except Exception as e:
+            self._log("wait_for_react", {"stable": False, "error": str(e)[:200]})
+            return {"ok": False, "error": str(e)}
+
+    async def highlight_element(self, locator, label: str = "") -> dict:
+        try:
+            await locator.evaluate(
+                """(el, label) => {
+                    const oldOutline = el.style.outline;
+                    const oldShadow = el.style.boxShadow;
+                    const oldPosition = el.style.position;
+                    if (!oldPosition || oldPosition === 'static') el.style.position = 'relative';
+                    el.style.outline = '3px solid #f59e0b';
+                    el.style.boxShadow = '0 0 0 6px rgba(245, 158, 11, .22)';
+                    el.dataset.lbccHighlight = label || 'target';
+                    setTimeout(() => {
+                        el.style.outline = oldOutline || '';
+                        el.style.boxShadow = oldShadow || '';
+                        el.style.position = oldPosition || '';
+                        delete el.dataset.lbccHighlight;
+                    }, 1600);
+                    return true;
+                }""",
+                label,
+            )
+            self._log("highlight_element", {"label": label})
+            return {"ok": True}
+        except Exception as e:
+            self._log("highlight_element", {"label": label, "error": str(e)[:200]})
+            return {"ok": False, "error": str(e)}
+
+    async def _overlay_info(self, locator) -> dict:
+        try:
+            return await locator.evaluate(
+                """el => {
+                    const rect = el.getBoundingClientRect();
+                    const x = Math.min(Math.max(rect.left + rect.width / 2, 0), window.innerWidth - 1);
+                    const y = Math.min(Math.max(rect.top + rect.height / 2, 0), window.innerHeight - 1);
+                    const top = document.elementFromPoint(x, y);
+                    const describe = node => {
+                        if (!node) return '';
+                        const id = node.id ? '#' + node.id : '';
+                        const cls = typeof node.className === 'string' && node.className
+                            ? '.' + node.className.trim().split(/\\s+/).slice(0, 3).join('.')
+                            : '';
+                        return `${node.tagName.toLowerCase()}${id}${cls}`;
+                    };
+                    return {
+                        blocked: !!top && top !== el && !el.contains(top),
+                        top: describe(top),
+                        target: describe(el),
+                        x,
+                        y
+                    };
+                }"""
+            )
+        except Exception as e:
+            return {"blocked": False, "error": str(e)[:200]}
+
+    async def _locator_value(self, locator) -> str:
+        try:
+            return await locator.input_value(timeout=2_000)
+        except Exception:
+            try:
+                value = await locator.evaluate(
+                    """el => {
+                        if ('value' in el) return el.value || '';
+                        return el.textContent || '';
+                    }"""
+                )
+                return value or ""
+            except Exception:
+                return ""
+
+    def _selector_attempts(self, selector: str) -> list[str]:
+        attempts = [selector]
+        if not selector.startswith(("#", ".", "[", "input", "button", "a", "select", "textarea")):
+            attempts += [
+                f"text={selector}",
+                f"a:has-text('{selector}')",
+                f"button:has-text('{selector}')",
+                f"[title='{selector}']",
+                f"span:has-text('{selector}')",
+            ]
+        attempts += [f"text={selector}", f":text('{selector}')"]
+        return list(dict.fromkeys(attempts))
+
+    async def click(self, selector: str) -> dict:
+        return await self.safe_click(selector)
+
+    async def safe_click(self, selector: str, timeout: int = 12000, retries: int = 2) -> dict:
+        async with self._lock:
+            last_error = ""
+            for attempt_no in range(1, retries + 1):
+                await self.wait_for_react()
+                for sel in self._selector_attempts(selector):
+                    try:
+                        locator = self._page.locator(sel).first
+                        await locator.wait_for(state="attached", timeout=timeout)
+                        self._log("safe_click", {"selector": sel, "step": "elemento_encontrado", "attempt": attempt_no})
+                        await locator.scroll_into_view_if_needed(timeout=timeout)
+                        await locator.wait_for(state="visible", timeout=timeout)
+                        enabled = await locator.is_enabled(timeout=2_000)
+                        if not enabled:
+                            last_error = "Campo desabilitado"
+                            self._log("safe_click", {"selector": sel, "step": "campo_desabilitado", "attempt": attempt_no})
+                            continue
+                        overlay = await self._overlay_info(locator)
+                        if overlay.get("blocked"):
+                            self._log("safe_click", {"selector": sel, "step": "overlay_detectado", "overlay": overlay})
+                        await self.highlight_element(locator, f"click:{sel[:60]}")
+                        await locator.hover(timeout=timeout)
+                        try:
+                            await locator.click(timeout=timeout)
+                        except Exception as normal_error:
+                            self._log("safe_click", {
+                                "selector": sel,
+                                "step": "click_normal_falhou_force",
+                                "error": str(normal_error)[:250],
+                            })
+                            await locator.click(timeout=timeout, force=True)
+                        await self.wait_for_react()
+                        self._log("safe_click", {"selector": sel, "step": "click_ok", "attempt": attempt_no})
+                        return {"ok": True, "selector": sel, "attempt": attempt_no, "overlay": overlay}
+                    except Exception as e:
+                        last_error = str(e)
+                        step = "elemento_invisivel" if "visible" in last_error.lower() else "falha"
+                        self._log("safe_click", {"selector": sel, "step": step, "error": last_error[:250]})
+                ss = await self.screenshot(f"safe_click_retry_{attempt_no}")
+                self._log("safe_click_retry", {
+                    "selector": selector,
+                    "attempt": attempt_no,
+                    "error": last_error[:300],
+                    "screenshot": ss.get("filename"),
+                })
+                await asyncio.sleep(0.6)
+            return {"ok": False, "error": last_error[:300]}
+
+    async def click_text(self, text: str, timeout: int = 10000) -> dict:
+        wanted = (text or "").strip()
+        if not wanted:
+            return {"ok": False, "error": "Texto vazio"}
+        attempts = [
+            f"role=button[name='{wanted}']",
+            f"role=link[name='{wanted}']",
+            f"text={wanted}",
+            f"a:has-text('{wanted}')",
+            f"button:has-text('{wanted}')",
+            f"[role=button]:has-text('{wanted}')",
+            f"[role=menuitem]:has-text('{wanted}')",
+            f"span:has-text('{wanted}')",
+        ]
+        last_error = ""
+        for sel in attempts:
+            result = await self.safe_click(sel, timeout=timeout, retries=1)
+            if result.get("ok"):
+                self._log("click_text", {"text": wanted, "selector": result.get("selector", sel)})
+                return {"ok": True, "text": wanted, "selector": result.get("selector", sel)}
+            last_error = result.get("error", "")
+        return {"ok": False, "text": wanted, "error": last_error[:300]}
+
+    async def fill(self, selector: str, value: str) -> dict:
+        return await self.safe_fill(selector, value)
+
+    async def safe_fill(self, selector: str, value: str, timeout: int = 12000, retries: int = 2) -> dict:
+        async with self._lock:
+            last_error = ""
+            for attempt_no in range(1, retries + 1):
+                try:
+                    await self.wait_for_react()
+                    locator = self._page.locator(selector).first
+                    await locator.wait_for(state="attached", timeout=timeout)
+                    self._log("safe_fill", {"selector": selector, "step": "elemento_encontrado", "attempt": attempt_no})
+                    await locator.scroll_into_view_if_needed(timeout=timeout)
+                    await locator.wait_for(state="visible", timeout=timeout)
+                    self._log("safe_fill", {"selector": selector, "step": "elemento_visivel", "attempt": attempt_no})
+                    enabled = await locator.is_enabled(timeout=2_000)
+                    if not enabled:
+                        last_error = "Campo desabilitado"
+                        self._log("safe_fill", {"selector": selector, "step": "campo_desabilitado", "attempt": attempt_no})
+                        raise RuntimeError(last_error)
+                    overlay = await self._overlay_info(locator)
+                    if overlay.get("blocked"):
+                        self._log("safe_fill", {"selector": selector, "step": "overlay_detectado", "overlay": overlay})
+                    await self.highlight_element(locator, f"fill:{selector[:60]}")
+                    await locator.click(timeout=timeout)
+                    try:
+                        await locator.fill("", timeout=timeout)
+                    except Exception:
+                        await self._page.keyboard.press("Control+A")
+                        await self._page.keyboard.press("Backspace")
+                    await locator.fill(value, timeout=timeout)
+                    filled = await self._locator_value(locator)
+                    if filled != value:
+                        last_error = f"Valor preenchido divergente: esperado {len(value)} chars, obtido {len(filled)} chars"
+                        self._log("safe_fill", {
+                            "selector": selector,
+                            "step": "valor_divergente",
+                            "expected_len": len(value),
+                            "actual_len": len(filled),
+                        })
+                        raise RuntimeError(last_error)
+                    self._log("safe_fill", {
+                        "selector": selector,
+                        "step": "valor_preenchido",
+                        "value_len": len(value),
+                        "attempt": attempt_no,
+                    })
+                    await self.wait_for_react()
+                    return {"ok": True, "selector": selector, "value_len": len(value), "attempt": attempt_no}
+                except Exception as e:
+                    last_error = str(e)
+                    step = "elemento_invisivel" if "visible" in last_error.lower() else "falha"
+                    self._log("safe_fill", {"selector": selector, "step": step, "error": last_error[:250]})
+                    ss = await self.screenshot(f"safe_fill_retry_{attempt_no}")
+                    self._log("safe_fill_retry", {
+                        "selector": selector,
+                        "attempt": attempt_no,
+                        "error": last_error[:300],
+                        "screenshot": ss.get("filename"),
+                    })
+                    await asyncio.sleep(0.6)
+            return {"ok": False, "selector": selector, "error": last_error[:300]}
+
     async def fill_login_credentials(self, email: str, password: str, submit: bool = True) -> dict:
         async with self._lock:
             if not email or not password:
