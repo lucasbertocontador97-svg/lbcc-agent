@@ -488,8 +488,16 @@ class Agent:
             return
 
         if action == "ask":
-            yield {"type": "ask", "text": cmd.get("message", "")}
-            approved = await browser.request_approval(cmd.get("message", ""))
+            message = cmd.get("message", "")
+            lowered = message.lower()
+            if any(token in lowered for token in ("senha", "password", "e-mail", "email", "login")):
+                message = (
+                    "Intervencao manual necessaria: preencha login/senha diretamente "
+                    "no navegador em modo manual e aprove quando terminar. Nao envie "
+                    "credenciais pelo chat."
+                )
+            yield {"type": "ask", "text": message}
+            approved = await browser.request_approval(message)
             yield {"type": "system" if approved else "stopped",
                    "text": "Aprovado. Continuando..." if approved else "Rejeitado pelo usuario."}
             return

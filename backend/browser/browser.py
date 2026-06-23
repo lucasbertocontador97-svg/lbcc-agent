@@ -264,6 +264,9 @@ class Browser:
         self._stop_flag = True
         self._pause_event.set()
         self._step_event.set()
+        if self._approval_pending:
+            self._approval_result = False
+            self._approval_event.set()
 
     def clear_stop(self):
         self._stop_flag = False
