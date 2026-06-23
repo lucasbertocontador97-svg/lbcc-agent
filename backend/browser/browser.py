@@ -247,7 +247,7 @@ class Browser:
     async def click(self, selector: str) -> dict:
         async with self._lock:
             try:
-                await self._page.wait_for_selector(selector, timeout=10_000)
+                await self._page.wait_for_selector(selector, timeout=15_000)
                 await self._page.click(selector)
                 return {"ok": True, "selector": selector}
             except Exception as e:
@@ -256,7 +256,7 @@ class Browser:
     async def fill(self, selector: str, value: str) -> dict:
         async with self._lock:
             try:
-                await self._page.wait_for_selector(selector, timeout=10_000)
+                await self._page.wait_for_selector(selector, timeout=15_000)
                 await self._page.fill(selector, value)
                 return {"ok": True, "selector": selector, "value": value}
             except Exception as e:
