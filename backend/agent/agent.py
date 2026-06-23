@@ -302,32 +302,52 @@ class Agent:
             async for event in self._execute_cmd({"action": "click_text", "text": "Tarefas"}, conv_id, exec_id):
                 yield event
 
-        async for event in self._execute_cmd(
-            {"action": "fill", "selector": "input[placeholder='Buscar por responsavel']", "value": person},
-            conv_id,
-            exec_id,
-        ):
-            yield event
+        counts = await browser.hub_task_counts_by_responsible(person)
+        ss = await browser.screenshot("hub_task_count")
+        if ss.get("ok") and ss.get("b64"):
+            yield {"type": "screenshot", "b64": ss["b64"], "label": "Hub Tarefas"}
 
-        status_clicked = False
-        for text in ("Todos Status", "Status", "Pendente", "Pendentes"):
-            async for event in self._execute_cmd({"action": "click_text", "text": text}, conv_id, exec_id):
-                yield event
-                if event.get("type") == "result" and event.get("ok"):
-                    status_clicked = True
-                    break
-            if status_clicked and text in ("Pendente", "Pendentes"):
-                break
-            if text in ("Todos Status", "Status") and status_clicked:
-                status_clicked = False
-                continue
+        if counts.get("ok"):
+            responsible_names = ", ".join(
+                item.get("name", "") for item in counts.get("matched_responsibles", [])
+                if item.get("name")
+            ) or person
+            pending_count = counts.get("pending_count", 0)
+            open_count = counts.get("open_count", 0)
+            done_count = counts.get("done_count", 0)
+            awaiting_count = counts.get("awaiting_approval_count", 0)
+            in_progress_count = counts.get("in_progress_count", 0)
+            matched_total = counts.get("matched_total", 0)
+            fetched_total = counts.get("fetched_total", 0)
+
+            yield {
+                "type": "done",
+                "text": (
+                    f"Contei internamente pela API do Hub para {responsible_names}: "
+                    f"{pending_count} pendente(s), {awaiting_count} aguardando aprovacao, "
+                    f"{in_progress_count} em andamento, {done_count} concluida(s). "
+                    f"Total do responsavel: {matched_total}. Total geral lido: {fetched_total}."
+                ),
+                "details": {
+                    "person": person,
+                    "status_requested": status,
+                    "responsibles": counts.get("matched_responsibles", []),
+                    "pending_count": pending_count,
+                    "open_count": open_count,
+                    "awaiting_approval_count": awaiting_count,
+                    "in_progress_count": in_progress_count,
+                    "done_count": done_count,
+                    "matched_total": matched_total,
+                    "fetched_total": fetched_total,
+                    "by_status": counts.get("by_status", {}),
+                    "global_by_status": counts.get("global_by_status", {}),
+                    "sample": counts.get("sample", [])[:10],
+                },
+            }
+            return
 
         await browser.wait(900)
         summary = await browser.task_page_summary()
-        ss = await browser.screenshot("hub_task_count")
-        if ss.get("ok") and ss.get("b64"):
-            yield {"type": "screenshot", "b64": ss["b64"], "label": "Tarefas filtradas"}
-
         counters = summary.get("counters", {}) if summary.get("ok") else {}
         pending_count = None
         for key, value in counters.items():

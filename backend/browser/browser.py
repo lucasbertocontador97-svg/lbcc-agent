@@ -1124,6 +1124,133 @@ class Browser:
         except Exception as e:
             return {"ok": False, "error": str(e), "url": ""}
 
+    async def hub_task_counts_by_responsible(self, person: str) -> dict:
+        try:
+            data = await self._page.evaluate(
+                """async ({person}) => {
+                    const norm = s => (s || '')
+                        .normalize('NFD')
+                        .replace(/[\\u0300-\\u036f]/g, '')
+                        .toLowerCase();
+                    async function rawJson(url, opts = {}) {
+                        const response = await fetch(url, {credentials: 'include', ...opts});
+                        const text = await response.text();
+                        let data = null;
+                        try { data = JSON.parse(text); } catch (_) { data = text; }
+                        return {ok: response.ok, status: response.status, data};
+                    }
+                    const tokenResponse = await rawJson('/api/auth/session-token');
+                    const token = tokenResponse.data && tokenResponse.data.token;
+                    if (!token) {
+                        return {ok: false, error: 'Nao consegui obter token de sessao do Hub.'};
+                    }
+                    const headers = {Authorization: `Bearer ${token}`};
+                    const getJson = url => rawJson(url, {headers});
+                    const colaboradoresResponse = await getJson('/api/colaboradores/listar');
+                    const colaboradores = Array.isArray(colaboradoresResponse.data)
+                        ? colaboradoresResponse.data
+                        : [];
+                    const target = norm(person);
+                    const matchedPeople = colaboradores.filter(c => norm(c.name).includes(target));
+                    const targetIds = new Set(matchedPeople.map(c => c.id).filter(Boolean));
+                    if (!targetIds.size) {
+                        return {
+                            ok: false,
+                            error: `Responsavel nao encontrado: ${person}`,
+                            colaboradores: colaboradores.map(c => c.name).filter(Boolean)
+                        };
+                    }
+
+                    const all = [];
+                    const pages = [];
+                    const limit = 50;
+                    let apiTotal = null;
+                    for (let skip = 0; skip < 5000; skip += limit) {
+                        const response = await getJson(`/api/tarefas?limit=${limit}&skip=${skip}&include_meta=true`);
+                        let items = [];
+                        if (Array.isArray(response.data)) {
+                            items = response.data;
+                        } else if (response.data && Array.isArray(response.data.items)) {
+                            items = response.data.items;
+                            apiTotal = response.data.total ?? response.data.count ?? response.data.meta?.total ?? apiTotal;
+                        }
+                        pages.push({skip, status: response.status, ok: response.ok, items: items.length});
+                        if (!response.ok) break;
+                        all.push(...items);
+                        if (items.length < limit) break;
+                    }
+
+                    const responsibleFields = task => Object.entries(task || {}).filter(([key]) => (
+                        /respons|colaborador|usuario|tecnico|owner|assigned/i.test(key)
+                    ));
+                    const valueText = value => {
+                        if (value == null) return '';
+                        if (typeof value === 'object') return JSON.stringify(value);
+                        return String(value);
+                    };
+                    const isTargetTask = task => responsibleFields(task).some(([_, value]) => (
+                        targetIds.has(String(value)) || norm(valueText(value)).includes(target)
+                    ));
+                    const statusOf = task => String(
+                        task.status || task.situacao || task.estado || 'sem_status'
+                    ).toLowerCase();
+                    const tasks = all.filter(isTargetTask);
+                    const byStatus = {};
+                    const globalByStatus = {};
+                    for (const task of tasks) byStatus[statusOf(task)] = (byStatus[statusOf(task)] || 0) + 1;
+                    for (const task of all) globalByStatus[statusOf(task)] = (globalByStatus[statusOf(task)] || 0) + 1;
+                    const sample = tasks.slice(0, 20).map(task => ({
+                        id: task.id,
+                        protocolo: task.protocolo,
+                        titulo: task.titulo,
+                        status: task.status,
+                        responsavel_id: task.responsavel_id || task.colaborador_id || task.usuario_id || task.assigned_to || '',
+                        responsavel_nome: task.responsavel_nome || task.colaborador_nome || task.usuario_nome || task.tecnico_nome || '',
+                        cliente: task.cliente_nome || task.razao_social || (task.cliente && task.cliente.razao_social) || ''
+                    }));
+                    return {
+                        ok: true,
+                        person,
+                        matched_responsibles: matchedPeople.map(c => ({
+                            id: c.id,
+                            name: c.name,
+                            role: c.role || ''
+                        })),
+                        fetched_total: all.length,
+                        api_total: apiTotal,
+                        matched_total: tasks.length,
+                        by_status: byStatus,
+                        global_by_status: globalByStatus,
+                        open_count: (byStatus.pendente || 0)
+                            + (byStatus.em_andamento || 0)
+                            + (byStatus.aguardando_aprovacao || 0),
+                        pending_count: byStatus.pendente || 0,
+                        in_progress_count: byStatus.em_andamento || 0,
+                        awaiting_approval_count: byStatus.aguardando_aprovacao || 0,
+                        done_count: byStatus.concluido || 0,
+                        rejected_count: byStatus.reprovado || 0,
+                        canceled_count: byStatus.cancelado || 0,
+                        pages,
+                        sample
+                    };
+                }""",
+                {"person": person},
+            )
+            self._log("hub_task_counts_by_responsible", {
+                "person": person,
+                "ok": data.get("ok", False),
+                "matched_total": data.get("matched_total"),
+                "by_status": data.get("by_status", {}),
+            })
+            return data
+        except Exception as e:
+            self._log("hub_task_counts_by_responsible", {
+                "person": person,
+                "ok": False,
+                "error": str(e)[:300],
+            })
+            return {"ok": False, "error": str(e)}
+
     async def task_page_summary(self) -> dict:
         try:
             data = await self._page.evaluate("""() => {
