@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -50,6 +51,7 @@ class Phase4BackendTest:
         self.headless = headless
         self.results: dict[str, StepResult] = {}
         self.failures: list[StepResult] = []
+        self.stopped_server = False
         self.download_before: set[str] = set()
         self.download_after: set[str] = set()
         self.report_path = LOGS_DIR / f"{self.run_id}_report.json"
@@ -93,9 +95,11 @@ class Phase4BackendTest:
                 await self.browser.stop()
             except Exception:
                 pass
+            self._restart_backend_server_if_needed()
         return 0 if self._approved() else 1
 
     async def _start_browser(self):
+        self._stop_conflicting_backend_server()
         try:
             await self.browser.start(headless=self.headless, profile_name="default")
             self.browser.begin_execution(self.run_id)
@@ -107,6 +111,59 @@ class Phase4BackendTest:
                     "esta rodando e segurando o mesmo perfil. Pare o servidor e rode o teste de novo."
                 ) from exc
             raise
+
+    def _stop_conflicting_backend_server(self):
+        if os.name != "nt":
+            return
+        command = (
+            "$matches = Get-CimInstance Win32_Process | "
+            "Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'python.*uvicorn.*backend.api.main:app' }; "
+            "$count = @($matches).Count; "
+            "$matches | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
+            "Write-Output $count"
+        )
+        try:
+            completed = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            count = int((completed.stdout or "0").strip().splitlines()[-1])
+        except Exception:
+            count = 0
+        if count:
+            self.stopped_server = True
+            self.logger.info(
+                "Servidor backend em execucao foi pausado temporariamente para liberar o perfil Chrome."
+            )
+            time.sleep(2)
+
+    def _restart_backend_server_if_needed(self):
+        if not self.stopped_server:
+            return
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "backend.api.main:app",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "8000",
+                ],
+                cwd=str(Path(__file__).resolve().parents[2]),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            self.logger.info("Servidor backend reiniciado em http://localhost:8000.")
+        except Exception as exc:
+            self.logger.info("Nao consegui reiniciar o servidor backend automaticamente: %s", exc)
 
     async def _step(
         self,
