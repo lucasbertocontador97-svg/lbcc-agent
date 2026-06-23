@@ -333,17 +333,35 @@ class Browser:
 
     async def click(self, selector: str) -> dict:
         async with self._lock:
-            try:
-                await self._page.wait_for_selector(selector, timeout=15_000)
-                await self._page.click(selector)
-                self._log("click", {"selector": selector})
-                return {"ok": True, "selector": selector}
-            except Exception as e:
+            # Tenta vários formatos de seletor automaticamente
+            attempts = [selector]
+
+            # Se parece texto, adicionar variantes
+            if not selector.startswith(("#", ".", "[", "input", "button", "a", "select", "textarea")):
+                attempts += [
+                    f"text={selector}",
+                    f"a:has-text('{selector}')",
+                    f"button:has-text('{selector}')",
+                    f"[title='{selector}']",
+                    f"span:has-text('{selector}')",
+                ]
+            # Variantes adicionais para qualquer seletor
+            attempts += [
+                f"text={selector}",
+                f":text('{selector}')",
+            ]
+
+            last_error = ""
+            for sel in attempts:
                 try:
-                    await self._page.locator(selector).first.click(timeout=5_000)
-                    return {"ok": True, "selector": selector}
-                except Exception:
-                    return {"ok": False, "error": str(e)}
+                    await self._page.locator(sel).first.click(timeout=8_000)
+                    self._log("click", {"selector": sel})
+                    return {"ok": True, "selector": sel}
+                except Exception as e:
+                    last_error = str(e)
+                    continue
+
+            return {"ok": False, "error": last_error[:200]}
 
     async def fill(self, selector: str, value: str) -> dict:
         async with self._lock:
