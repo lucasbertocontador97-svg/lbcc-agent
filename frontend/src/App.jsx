@@ -543,13 +543,27 @@ export default function App() {
   const doNextStep = () => { setStepWaiting(false); send({type:"next_step"}); };
   const toggleStep = () => { const n=!stepMode; setStepMode(n); send({type:n?"step_mode_on":"step_mode_off"}); };
   const toggleManual = () => { send({type:manualMode?"manual_off":"manual_on"}); setManualMode(v=>!v); };
-  const startTeach = () => {
-    const name = prompt("Nome do procedimento:", "baixar_documento");
-    if (!name) return;
-    const description = prompt("Descricao:", `Procedimento ensinado: ${name}`) || "";
-    send({type:"teach_start", name, description});
+  const startTeach = async () => {
+    const stamp = new Date().toISOString().replace(/[-:T.]/g, "").slice(0, 14);
+    const name = `procedimento_${stamp}`;
+    try {
+      const result = await api.teachStart({ name, description: `Procedimento ensinado: ${name}` });
+      setTeaching({active:true, name:result.name || name, steps_count:0});
+      setEvents(prev => [...prev, {type:"system", text:`Modo ensinar ativo: ${result.name || name}`}]);
+    } catch {
+      send({type:"teach_start", name, description:`Procedimento ensinado: ${name}`});
+    }
   };
-  const stopTeach = () => send({type:"teach_stop"});
+  const stopTeach = async () => {
+    try {
+      const result = await api.teachStop();
+      const proc = result.procedure || {};
+      setTeaching({active:false});
+      setEvents(prev => [...prev, {type:"system", text: result.ok ? `Procedimento salvo: ${proc.name}` : (result.error || "Modo ensinar encerrado.")}]);
+    } catch {
+      send({type:"teach_stop"});
+    }
+  };
   const switchTab = (i) => send({type:"switch_tab",index:i});
   const closeTab  = (i) => send({type:"close_tab",index:i});
   const newTab    = () => send({type:"new_tab",url:""});
