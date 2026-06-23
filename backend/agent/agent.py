@@ -118,6 +118,14 @@ class Agent:
             return
 
         # ── Comandos diretos de abas ───────────────────────────────────────────
+        direct_url = self._extract_direct_url(user_message)
+        lower_message = user_message.lower()
+        if direct_url and "nova aba" not in lower_message and "abrir nova aba" not in lower_message:
+            async for event in self._execute_cmd({"action": "navigate", "url": direct_url}, conv_id, exec_id):
+                yield event
+            yield {"type": "done", "text": f"Acessei {direct_url}"}
+            return
+
         tab_result = await self._handle_tab_command(user_message)
         if tab_result:
             yield tab_result
@@ -577,6 +585,12 @@ class Agent:
             return resp.choices[0].message.content.strip()
         except Exception:
             return None
+
+    def _extract_direct_url(self, msg: str) -> str:
+        match = re.search(r"https?://[^\s)>\]\"']+", msg or "", flags=re.IGNORECASE)
+        if not match:
+            return ""
+        return match.group(0).rstrip(".,;:")
 
     async def _handle_tab_command(self, msg: str) -> Optional[dict]:
         """Interpreta comandos de abas em linguagem natural."""
