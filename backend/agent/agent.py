@@ -49,7 +49,12 @@ Cookies, sessões e logins são mantidos entre execuções.
 - Logins feitos manualmente (modo manual) ficam salvos permanentemente.
 - Para downloads: arquivos caem em data/downloads/ automaticamente.
 - Para abas: use list_tabs para ver o estado atual antes de trocar.
-- Seletores CSS: prefira #id, [name=x], button, input[type=submit].
+- Seletores CSS válidos: #id, [name=x], button, a, input[type=submit], .classe
+- NUNCA use :contains() — não funciona no Playwright.
+- Para clicar em texto use: text=Documentos  ou  a[href*=documento]
+- Se uma ação falhar 2x, tente selector diferente ou use ask.
+- Após screenshot, verifique se página mudou. Se tarefa concluída, use done.
+- Nunca tire screenshots repetidos da mesma página sem agir.
 - Nunca invente dados. Se faltar informação, use ask.
 - Responda APENAS com JSON. Sem texto fora do JSON.
 - Máximo 40 iterações por tarefa.
