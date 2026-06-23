@@ -227,6 +227,7 @@ class Browser:
         self._manual_mode = True
         self._stop_flag = False
         self._pause_event.set()
+        await self._ensure_active_page()
         await self._ensure_teaching_binding()
         for page in list(self._pages):
             await self._install_teaching_hooks(page)
@@ -390,7 +391,13 @@ class Browser:
         if not self._ctx:
             await self._launch_context(self._profile_name, self._headless)
         if not self._pages:
-            page = await self._ctx.new_page()
+            try:
+                page = await self._ctx.new_page()
+            except Exception:
+                self._ctx = None
+                self._pages = []
+                await self._launch_context(self._profile_name, self._headless)
+                page = self._pages[0] if self._pages else await self._ctx.new_page()
             self._pages = [page]
             self._setup_page_events(page)
             await self._install_teaching_hooks(page)
