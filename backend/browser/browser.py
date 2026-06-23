@@ -224,6 +224,9 @@ class Browser:
         self._teaching_started_at = datetime.now().isoformat()
         self._teaching_last_sig = ""
         self._teaching_last_ts = 0.0
+        self._manual_mode = True
+        self._stop_flag = False
+        self._pause_event.set()
         await self._ensure_teaching_binding()
         for page in list(self._pages):
             await self._install_teaching_hooks(page)
@@ -248,6 +251,7 @@ class Browser:
         self._teaching_name = ""
         self._teaching_description = ""
         self._teaching_steps = []
+        self._manual_mode = False
         proc = procs.save_procedure(
             name,
             description,

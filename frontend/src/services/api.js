@@ -14,6 +14,7 @@ export const api = {
   teachStatus:     ()    => get("/api/teach/status"),
   teachStart:      (b)   => post("/api/teach/start", b),
   teachStop:       ()    => post("/api/teach/stop", {}),
+  stopControl:     ()    => post("/api/control/stop", {}),
   listScreenshots: ()    => get("/api/screenshots"),
   listVideos:      ()    => get("/api/videos"),
   listFiles:       ()    => get("/api/files"),

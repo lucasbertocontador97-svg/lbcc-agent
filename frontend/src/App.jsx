@@ -538,7 +538,14 @@ export default function App() {
 
   const onKey = (e) => { if (e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMsg(input);} };
 
-  const doStop    = () => { send({type:"stop"}); setBusy(false); };
+  const doStop    = async () => {
+    setBusy(false);
+    setApprovalPending(false);
+    setStepWaiting(false);
+    try { await api.stopControl(); } catch {}
+    send({type:"stop"});
+    setEvents(prev => [...prev, {type:"system", text:"Parada solicitada."}]);
+  };
   const doPause   = () => send({type:paused?"resume":"pause"});
   const doApprove = () => { setApprovalPending(false); setBusy(true); send({type:"approve"}); };
   const doReject  = () => { setApprovalPending(false); send({type:"reject"}); };
@@ -551,6 +558,7 @@ export default function App() {
     try {
       const result = await api.teachStart({ name, description: `Procedimento ensinado: ${name}` });
       setTeaching({active:true, name:result.name || name, steps_count:0});
+      setManualMode(true);
       setEvents(prev => [...prev, {type:"system", text:`Modo ensinar ativo: ${result.name || name}`}]);
     } catch {
       send({type:"teach_start", name, description:`Procedimento ensinado: ${name}`});
@@ -561,6 +569,7 @@ export default function App() {
       const result = await api.teachStop();
       const proc = result.procedure || {};
       setTeaching({active:false});
+      setManualMode(false);
       setEvents(prev => [...prev, {type:"system", text: result.ok ? `Procedimento salvo: ${proc.name}` : (result.error || "Modo ensinar encerrado.")}]);
     } catch {
       send({type:"teach_stop"});

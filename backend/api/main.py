@@ -55,7 +55,7 @@ def _safe_credential(alias: str, item: dict) -> dict:
 async def lifespan(app: FastAPI):
     await db.init_db()
     procs.create_examples()
-    headless = os.getenv("BROWSER_HEADLESS", "true").lower() == "true"
+    headless = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
     await browser.start(headless=headless)
     print(f"[api] LBCC Agent Fase 3 pronto. headless={headless}")
     yield
@@ -437,6 +437,20 @@ async def teach_stop():
 @app.get("/api/teach/status")
 async def teach_status():
     return browser.teaching_status()
+
+@app.post("/api/control/stop")
+async def control_stop():
+    browser.reject()
+    browser.request_stop()
+    browser.resume()
+    browser.disable_step_mode()
+    return {
+        "ok": True,
+        "stopped": True,
+        "approval_pending": browser.approval_pending,
+        "manual_mode": browser.is_manual_mode,
+        "teaching": browser.teaching_status(),
+    }
 
 @app.get("/api/attachments")
 async def list_attachments():
