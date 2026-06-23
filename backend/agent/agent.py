@@ -1,6 +1,5 @@
 """
-Agente — loop LLM + browser.
-Fase 2: replay de procedimentos, pausa, passo-a-passo, aprovação humana, novos comandos.
+Agente — Fase 3: abas, downloads, uploads, login persistente.
 """
 import asyncio
 import json
@@ -19,31 +18,38 @@ MAX_RETRIES     = 3
 RETRY_DELAY_S   = 2
 
 SYSTEM = """Você é o Agente Operacional LBCC.
-Você controla um navegador Chrome real para executar tarefas de escritório contábil.
-O Chrome mantém sessões, cookies e logins entre execuções.
+Você controla um navegador Chrome real com perfil persistente.
+Cookies, sessões e logins são mantidos entre execuções.
 
 ## Ferramentas disponíveis — responda SEMPRE com JSON válido:
 
-{"action": "navigate",     "url": "https://..."}
-{"action": "click",        "selector": "css"}
-{"action": "fill",         "selector": "css", "value": "texto"}
-{"action": "key",          "key": "Enter"}
-{"action": "scroll",       "direction": "down", "amount": 500}
-{"action": "wait",         "ms": 1000}
-{"action": "wait_selector","selector": "css", "timeout": 15000}
-{"action": "select",       "selector": "css", "value": "opcao"}
-{"action": "hover",        "selector": "css"}
-{"action": "upload",       "selector": "css", "file": "nome_arquivo.pdf"}
+{"action": "navigate",      "url": "https://..."}
+{"action": "click",         "selector": "css"}
+{"action": "fill",          "selector": "css", "value": "texto"}
+{"action": "key",           "key": "Enter"}
+{"action": "scroll",        "direction": "down", "amount": 500}
+{"action": "wait",          "ms": 1000}
+{"action": "wait_selector", "selector": "css", "timeout": 15000}
+{"action": "select",        "selector": "css", "value": "opcao"}
+{"action": "hover",         "selector": "css"}
+{"action": "upload",        "selector": "css", "file": "nome.pdf"}
+{"action": "download",      "url": "https://...", "filename": "arquivo.pdf"}
 {"action": "screenshot"}
-{"action": "done",         "message": "Tarefa concluída: ..."}
-{"action": "ask",          "message": "Situação: X. Deseja continuar?"}
-{"action": "error",        "message": "Não consegui porque ..."}
+{"action": "new_tab",       "url": "https://..."}
+{"action": "switch_tab",    "index": 0}
+{"action": "close_tab",     "index": 0}
+{"action": "list_tabs"}
+{"action": "done",          "message": "Tarefa concluída: ..."}
+{"action": "ask",           "message": "Situação: X. Deseja continuar?"}
+{"action": "error",         "message": "Não consegui porque ..."}
 
-## Regras
-- O Chrome mantém logins — se já fez login antes, a sessão pode estar ativa.
-- Verifique o estado atual antes de agir.
-- Use seletores CSS precisos: #id, [name=x], button, input[type=submit].
-- Para texto de botões use: text="Emitir" ou :has-text('Emitir').
+## Regras importantes
+- O Chrome mantém sessões — verifique se já está logado antes de tentar login.
+- Para verificar login: use page_state e verifique o conteúdo da página.
+- Logins feitos manualmente (modo manual) ficam salvos permanentemente.
+- Para downloads: arquivos caem em data/downloads/ automaticamente.
+- Para abas: use list_tabs para ver o estado atual antes de trocar.
+- Seletores CSS: prefira #id, [name=x], button, input[type=submit].
 - Nunca invente dados. Se faltar informação, use ask.
 - Responda APENAS com JSON. Sem texto fora do JSON.
 - Máximo 40 iterações por tarefa.
@@ -56,8 +62,6 @@ class Agent:
         from dotenv import load_dotenv
         load_dotenv()
         self._client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        # Aguarda aprovação: guarda o canal de comunicação
-        self._pending_approval_resolve = None
 
     async def run(
         self,
@@ -68,68 +72,74 @@ class Agent:
         variables: dict = None,
     ) -> AsyncGenerator[dict, None]:
 
-        deadline = time.time() + TIMEOUT_SECONDS
+        deadline  = time.time() + TIMEOUT_SECONDS
         variables = variables or {}
 
         # ── Tentar replay de procedimento ──────────────────────────────────────
         proc = self._find_procedure(user_message)
         if proc:
             yield {"type": "system",
-                   "text": f"📋 Procedimento encontrado: '{proc['name']}'. Executando replay..."}
-            async for event in self._replay_procedure(proc, conv_id, exec_id, variables):
+                   "text": f"📋 Procedimento '{proc['name']}' encontrado. Executando..."}
+            async for event in self._replay(proc, conv_id, exec_id, variables):
                 yield event
             return
 
-        # ── Loop LLM normal ────────────────────────────────────────────────────
+        # ── Comandos diretos de abas ───────────────────────────────────────────
+        tab_result = await self._handle_tab_command(user_message)
+        if tab_result:
+            yield tab_result
+            return
+
+        # ── Loop LLM ───────────────────────────────────────────────────────────
         messages = [{"role": "system", "content": SYSTEM}]
         for h in history[-16:]:
             messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": user_message})
 
         for iteration in range(40):
-
-            # Verificar STOP
             if browser.should_stop:
-                yield {"type": "stopped", "text": "Execução interrompida pelo usuário."}
+                yield {"type": "stopped", "text": "Execução interrompida."}
                 return
 
-            # Verificar TIMEOUT
             if time.time() > deadline:
                 yield {"type": "timeout",
-                       "text": f"Execução interrompida por timeout ({TIMEOUT_SECONDS}s)."}
+                       "text": f"Timeout após {TIMEOUT_SECONDS}s."}
                 return
 
-            # Aguardar se pausado
             if browser.is_paused:
-                yield {"type": "paused", "text": "Execução pausada. Aguardando retomada..."}
+                yield {"type": "paused", "text": "Pausado. Aguardando..."}
                 await browser.wait_if_paused()
                 if browser.should_stop:
-                    yield {"type": "stopped", "text": "Interrompido durante pausa."}
+                    yield {"type": "stopped", "text": "Interrompido."}
                     return
-                yield {"type": "resumed", "text": "Execução retomada."}
+                yield {"type": "resumed", "text": "Retomado."}
 
-            # Estado da página
             state = await browser.page_state()
+            tabs_info = ""
+            if state.get("tabs"):
+                tabs_info = f"\nAbas abertas: {json.dumps(state['tabs'], ensure_ascii=False)}"
+
             state_text = (
-                f"\n[Página atual]\n"
+                f"\n[Estado atual]\n"
                 f"URL: {state.get('url','?')}\n"
                 f"Título: {state.get('title','?')}\n"
+                f"Aba ativa: {state.get('active_tab', 0)}{tabs_info}\n"
                 f"Elementos ({len(state.get('elements',[]))}): "
                 f"{json.dumps(state.get('elements',[])[:12], ensure_ascii=False)}\n"
                 f"Texto: {state.get('body','')[:800]}"
             )
 
-            ctx_messages = messages.copy()
-            ctx_messages.append({"role": "user",
-                                  "content": f"[iteração {iteration+1}]{state_text}"})
+            ctx_msgs = messages.copy()
+            ctx_msgs.append({"role": "user",
+                             "content": f"[iteração {iteration+1}]{state_text}"})
 
-            # Chamar LLM com retry
+            # LLM com retry
             raw = None
             for attempt in range(MAX_RETRIES):
                 try:
                     resp = await self._client.chat.completions.create(
                         model="gpt-4o",
-                        messages=ctx_messages,
+                        messages=ctx_msgs,
                         temperature=0.1,
                         max_tokens=512,
                         response_format={"type": "json_object"},
@@ -139,11 +149,10 @@ class Agent:
                 except Exception as e:
                     if attempt < MAX_RETRIES - 1:
                         yield {"type": "retry",
-                               "text": f"Tentativa {attempt+1} falhou: {e}. Tentando..."}
+                               "text": f"Tentativa {attempt+1}: {e}"}
                         await asyncio.sleep(RETRY_DELAY_S)
                     else:
-                        yield {"type": "error",
-                               "text": f"LLM falhou após {MAX_RETRIES} tentativas: {e}"}
+                        yield {"type": "error", "text": f"LLM falhou: {e}"}
                         return
 
             try:
@@ -152,7 +161,6 @@ class Agent:
                 yield {"type": "error", "text": f"JSON inválido: {raw[:200]}"}
                 return
 
-            # Executar comando
             async for event in self._execute_cmd(cmd, conv_id, exec_id):
                 yield event
 
@@ -161,55 +169,56 @@ class Agent:
                 return
 
             messages.append({"role": "assistant", "content": raw})
-            result_summary = f"[resultado] ação={action} ok={True}"
-            messages.append({"role": "user", "content": result_summary})
+            messages.append({"role": "user",
+                             "content": f"[resultado] ação={action} concluída"})
 
         yield {"type": "error", "text": "Limite de 40 iterações atingido."}
 
-    async def _replay_procedure(
-        self, proc: dict, conv_id: str, exec_id: str, variables: dict
-    ) -> AsyncGenerator[dict, None]:
-        """Executa um procedimento salvo passo a passo."""
-        steps = procs.apply_variables(proc.get("steps", []), variables)
-        total = len(steps)
+    async def _handle_tab_command(self, msg: str) -> Optional[dict]:
+        """Interpreta comandos de abas em linguagem natural."""
+        m = msg.lower().strip()
 
-        for i, step in enumerate(steps):
-            if browser.should_stop:
-                yield {"type": "stopped", "text": "Replay interrompido."}
-                return
+        if "listar abas" in m or "list tabs" in m:
+            tabs = await browser.list_tabs()
+            text = "Abas abertas:\n" + "\n".join(
+                f"  {'→' if t['active'] else ' '} [{t['index']}] {t['title']} — {t['url']}"
+                for t in tabs
+            )
+            return {"type": "done", "text": text}
 
-            # Modo passo a passo
-            if browser.is_step_mode:
-                yield {"type": "step_waiting",
-                       "text": f"Passo {i+1}/{total}: {step.get('action')} — aguardando aprovação"}
-                await browser.wait_for_step()
-                if browser.should_stop:
-                    yield {"type": "stopped", "text": "Interrompido no passo a passo."}
-                    return
+        if "fechar aba" in m:
+            import re
+            nums = re.findall(r'\d+', m)
+            idx = int(nums[0]) if nums else None
+            result = await browser.close_tab(idx)
+            if result["ok"]:
+                return {"type": "done",
+                        "text": f"Aba {result['closed_index']} fechada. Ativa: {result['active_index']}"}
+            return {"type": "error", "text": result["error"]}
 
-            yield {"type": "system",
-                   "text": f"[{i+1}/{total}] {step.get('action')} {step.get('url') or step.get('selector','') or step.get('value','') or ''}"}
+        if "trocar para aba" in m or "mudar para aba" in m or "switch tab" in m:
+            import re
+            nums = re.findall(r'\d+', m)
+            if nums:
+                result = await browser.switch_tab(int(nums[0]))
+                if result["ok"]:
+                    return {"type": "done",
+                            "text": f"Trocado para aba {result['index']}: {result['title']}"}
+                return {"type": "error", "text": result["error"]}
 
-            async for event in self._execute_cmd(step, conv_id, exec_id):
-                yield event
+        if "nova aba" in m or "abrir nova aba" in m:
+            import re
+            urls = re.findall(r'https?://\S+', msg)
+            result = await browser.new_tab(urls[0] if urls else "")
+            return {"type": "done", "text": f"Nova aba aberta (índice {result['index']})"}
 
-            action = step.get("action", "")
-            if action in ("ask", "error"):
-                return
-
-        ss = await browser.screenshot("replay_final")
-        if ss.get("ok") and ss.get("b64"):
-            yield {"type": "screenshot", "b64": ss["b64"], "label": "Replay concluído"}
-
-        yield {"type": "done", "text": f"Procedimento '{proc['name']}' concluído com {total} passos."}
+        return None
 
     async def _execute_cmd(
         self, cmd: dict, conv_id: str, exec_id: str
     ) -> AsyncGenerator[dict, None]:
-        """Executa um único comando e gera eventos."""
         action = cmd.get("action", "")
 
-        # ── Terminais ─────────────────────────────────────────────────────────
         if action == "done":
             ss = await browser.screenshot("resultado_final")
             if ss.get("ok") and ss.get("b64"):
@@ -220,12 +229,10 @@ class Agent:
             return
 
         if action == "ask":
-            msg = cmd.get("message", "")
-            # Pede aprovação real ao usuário
-            yield {"type": "ask", "text": msg}
-            approved = await browser.request_approval(msg)
+            yield {"type": "ask", "text": cmd.get("message", "")}
+            approved = await browser.request_approval(cmd.get("message", ""))
             if not approved:
-                yield {"type": "stopped", "text": "Ação rejeitada pelo usuário."}
+                yield {"type": "stopped", "text": "Rejeitado pelo usuário."}
             else:
                 yield {"type": "system", "text": "Aprovado. Continuando..."}
             return
@@ -234,7 +241,6 @@ class Agent:
             yield {"type": "error", "text": cmd.get("message", "Erro.")}
             return
 
-        # ── Ações do browser ──────────────────────────────────────────────────
         yield {"type": "action", **cmd}
 
         result = {}
@@ -263,28 +269,71 @@ class Agent:
             result = await browser.hover(cmd.get("selector",""))
         elif action == "upload":
             result = await browser.upload_file(cmd.get("selector",""), cmd.get("file",""))
+        elif action == "download":
+            result = await browser.download_file(cmd.get("url",""), cmd.get("filename",""))
+            if result.get("ok"):
+                yield {"type": "system",
+                       "text": f"📥 Download salvo: {result.get('filename')}"}
         elif action == "screenshot":
             ss = await browser.screenshot("manual")
             if ss.get("ok") and ss.get("b64"):
                 yield {"type": "screenshot", "b64": ss["b64"], "label": "Manual"}
             result = {"ok": ss.get("ok", False)}
+        elif action == "new_tab":
+            result = await browser.new_tab(cmd.get("url", ""))
+        elif action == "switch_tab":
+            result = await browser.switch_tab(cmd.get("index", 0))
+        elif action == "close_tab":
+            result = await browser.close_tab(cmd.get("index"))
+        elif action == "list_tabs":
+            tabs = await browser.list_tabs()
+            yield {"type": "system",
+                   "text": "Abas: " + " | ".join(
+                       f"[{t['index']}]{'*' if t['active'] else ''} {t['title'][:30]}"
+                       for t in tabs
+                   )}
+            result = {"ok": True, "tabs": tabs}
         else:
             result = {"ok": False, "error": f"Ação desconhecida: {action}"}
 
         yield {"type": "result", **result}
 
-        # Screenshot automático (exceto wait e scroll)
-        if action not in ("screenshot", "wait", "scroll", "hover"):
+        # Screenshot automático
+        if action not in ("screenshot", "wait", "scroll", "hover", "list_tabs"):
             ss = await browser.screenshot(label)
             if ss.get("ok") and ss.get("b64"):
                 yield {"type": "screenshot", "b64": ss["b64"], "label": label}
 
-        # Log
         await db.save_action_log(str(uuid.uuid4()), conv_id, exec_id,
                                  action, cmd, result, result.get("ok", False))
 
+    async def _replay(self, proc: dict, conv_id: str,
+                      exec_id: str, variables: dict) -> AsyncGenerator[dict, None]:
+        steps = procs.apply_variables(proc.get("steps", []), variables)
+        total = len(steps)
+        for i, step in enumerate(steps):
+            if browser.should_stop:
+                yield {"type": "stopped", "text": "Replay interrompido."}
+                return
+            if browser.is_step_mode:
+                yield {"type": "step_waiting",
+                       "text": f"Passo {i+1}/{total}: {step.get('action')}"}
+                await browser.wait_for_step()
+                if browser.should_stop:
+                    return
+            yield {"type": "system",
+                   "text": f"[{i+1}/{total}] {step.get('action')} {step.get('url') or step.get('selector','') or ''}"}
+            async for event in self._execute_cmd(step, conv_id, exec_id):
+                yield event
+            if step.get("action") in ("ask", "error"):
+                return
+        ss = await browser.screenshot("replay_final")
+        if ss.get("ok") and ss.get("b64"):
+            yield {"type": "screenshot", "b64": ss["b64"], "label": "Concluído"}
+        yield {"type": "done",
+               "text": f"Procedimento '{proc['name']}' concluído ({total} passos)."}
+
     def _find_procedure(self, message: str) -> Optional[dict]:
-        """Verifica se a mensagem corresponde a um procedimento salvo."""
         all_procs = procs.list_procedures()
         msg_lower = message.lower()
         for p in all_procs:

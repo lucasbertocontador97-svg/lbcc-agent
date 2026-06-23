@@ -1,5 +1,5 @@
 """
-LBCC Agent — API principal. Fase 2.
+LBCC Agent — API principal. Fase 3.
 """
 import json, os, uuid, time
 from contextlib import asynccontextmanager
@@ -7,11 +7,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.agent.agent import agent, TIMEOUT_SECONDS
-from backend.browser.browser import browser, VIDEOS_DIR, SCREENSHOTS_DIR, DOWNLOADS_DIR, ATTACHMENTS_DIR
+from backend.browser.browser import (browser, VIDEOS_DIR, SCREENSHOTS_DIR,
+                                      DOWNLOADS_DIR, ATTACHMENTS_DIR, LOGS_DIR)
 from backend.db import database as db
 from backend.procedures import manager as procs
 
@@ -24,12 +25,12 @@ async def lifespan(app: FastAPI):
     procs.create_examples()
     headless = os.getenv("BROWSER_HEADLESS", "true").lower() == "true"
     await browser.start(headless=headless)
-    print(f"[api] LBCC Agent Fase 2 pronto. headless={headless}")
+    print(f"[api] LBCC Agent Fase 3 pronto. headless={headless}")
     yield
     await browser.stop()
 
 
-app = FastAPI(title="LBCC Agent", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="LBCC Agent", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -38,25 +39,18 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
 
 class WsManager:
     def __init__(self):
-        self._sockets: dict[str, WebSocket] = {}
+        self._s: dict[str, WebSocket] = {}
 
     async def connect(self, sid: str, ws: WebSocket):
         await ws.accept()
-        self._sockets[sid] = ws
+        self._s[sid] = ws
 
     def disconnect(self, sid: str):
-        self._sockets.pop(sid, None)
+        self._s.pop(sid, None)
 
     async def send(self, sid: str, data: dict):
-        ws = self._sockets.get(sid)
+        ws = self._s.get(sid)
         if ws:
-            try:
-                await ws.send_json(data)
-            except Exception:
-                pass
-
-    async def broadcast(self, data: dict):
-        for ws in self._sockets.values():
             try:
                 await ws.send_json(data)
             except Exception:
@@ -77,53 +71,56 @@ async def websocket(ws: WebSocket, sid: str):
 
             if t == "chat":
                 await _handle_chat(sid, msg)
-
             elif t == "stop":
                 browser.request_stop()
-                await wsm.send(sid, {"type": "system", "text": "⏹ Sinal de parada enviado."})
-
+                await wsm.send(sid, {"type": "system", "text": "⏹ Parada solicitada."})
             elif t == "pause":
                 browser.pause()
-                await wsm.send(sid, {"type": "paused", "text": "⏸ Execução pausada."})
-
+                await wsm.send(sid, {"type": "paused", "text": "⏸ Pausado."})
             elif t == "resume":
                 browser.resume()
-                await wsm.send(sid, {"type": "resumed", "text": "▶ Execução retomada."})
-
+                await wsm.send(sid, {"type": "resumed", "text": "▶ Retomado."})
             elif t == "next_step":
                 browser.next_step()
-                await wsm.send(sid, {"type": "system", "text": "→ Próximo passo liberado."})
-
+                await wsm.send(sid, {"type": "system", "text": "→ Próximo passo."})
             elif t == "step_mode_on":
                 browser.enable_step_mode()
-                await wsm.send(sid, {"type": "system", "text": "🔢 Modo passo a passo ativado."})
-
+                await wsm.send(sid, {"type": "system", "text": "🔢 Modo passo a passo ON."})
             elif t == "step_mode_off":
                 browser.disable_step_mode()
-                await wsm.send(sid, {"type": "system", "text": "🔢 Modo passo a passo desativado."})
-
+                await wsm.send(sid, {"type": "system", "text": "🔢 Modo passo a passo OFF."})
             elif t == "approve":
                 browser.approve()
-                await wsm.send(sid, {"type": "system", "text": "✅ Aprovado. Continuando..."})
-
+                await wsm.send(sid, {"type": "system", "text": "✅ Aprovado."})
             elif t == "reject":
                 browser.reject()
                 browser.request_stop()
-                await wsm.send(sid, {"type": "system", "text": "❌ Rejeitado. Parando execução."})
-
+                await wsm.send(sid, {"type": "system", "text": "❌ Rejeitado."})
             elif t == "manual_on":
                 browser.set_manual_mode(True)
-                await wsm.send(sid, {"type": "system", "text": "🖐 Modo manual ativado."})
-
+                await wsm.send(sid, {"type": "system", "text": "🖐 Modo manual ON."})
             elif t == "manual_off":
                 browser.set_manual_mode(False)
-                await wsm.send(sid, {"type": "system", "text": "🤖 Controle devolvido ao agente."})
-
+                await wsm.send(sid, {"type": "system", "text": "🤖 Agente retomou controle."})
             elif t == "screenshot":
                 ss = await browser.screenshot("manual")
                 if ss.get("ok") and ss.get("b64"):
                     await wsm.send(sid, {"type": "screenshot", "b64": ss["b64"], "label": "Manual"})
-
+            elif t == "list_tabs":
+                tabs = await browser.list_tabs()
+                await wsm.send(sid, {"type": "tabs", "tabs": tabs})
+            elif t == "switch_tab":
+                result = await browser.switch_tab(msg.get("index", 0))
+                await wsm.send(sid, {"type": "system",
+                                      "text": f"Aba {result.get('index')} ativa: {result.get('title','')}"})
+            elif t == "new_tab":
+                result = await browser.new_tab(msg.get("url", ""))
+                await wsm.send(sid, {"type": "system",
+                                      "text": f"Nova aba aberta (índice {result.get('index')})"})
+            elif t == "close_tab":
+                result = await browser.close_tab(msg.get("index"))
+                await wsm.send(sid, {"type": "system",
+                                      "text": f"Aba fechada. Ativa: {result.get('active_index')}"})
             elif t == "ping":
                 await wsm.send(sid, {"type": "pong"})
 
@@ -145,7 +142,7 @@ async def _handle_chat(sid: str, msg: dict):
 
     if browser.is_manual_mode:
         await wsm.send(sid, {"type": "system",
-                              "text": "🖐 Modo manual ativo. Desative antes de enviar comandos."})
+                              "text": "🖐 Modo manual ativo. Desative para enviar comandos."})
         return
 
     exec_id = str(uuid.uuid4())
@@ -165,11 +162,10 @@ async def _handle_chat(sid: str, msg: dict):
 
     async for event in agent.run(text, conv_id, exec_id, history, variables):
         await wsm.send(sid, event)
-
         if event["type"] == "retry":
             retries += 1
         if event["type"] in ("done", "error", "ask", "stopped", "timeout"):
-            full_reply   = event.get("text", "")
+            full_reply = event.get("text", "")
             if event["type"] != "done":
                 final_status = event["type"]
 
@@ -189,6 +185,7 @@ async def _handle_chat(sid: str, msg: dict):
 
 @app.get("/api/status")
 async def status():
+    tabs = await browser.list_tabs()
     return {
         "ok": True,
         "browser_url":      browser.url,
@@ -198,9 +195,10 @@ async def status():
         "approval_pending": browser.approval_pending,
         "approval_message": browser.approval_message,
         "timeout_seconds":  TIMEOUT_SECONDS,
+        "tabs":             tabs,
+        "active_tab":       browser._active_idx,
+        "downloads":        len(browser.list_downloads()),
     }
-
-# ── Conversations ──────────────────────────────────────────────────────────────
 
 @app.get("/api/conversations")
 async def list_conversations():
@@ -219,8 +217,6 @@ async def get_messages(cid: str):
 async def get_logs(cid: str):
     return await db.get_action_logs(cid)
 
-# ── Execuções ──────────────────────────────────────────────────────────────────
-
 @app.get("/api/executions")
 async def list_executions():
     return await db.list_executions()
@@ -228,8 +224,7 @@ async def list_executions():
 @app.get("/api/executions/{exec_id}")
 async def get_execution(exec_id: str):
     ex = await db.get_execution(exec_id)
-    if not ex:
-        raise HTTPException(404)
+    if not ex: raise HTTPException(404)
     return ex
 
 @app.get("/api/executions/{exec_id}/logs")
@@ -246,6 +241,24 @@ async def export_logs(exec_id: str):
     return FileResponse(str(tmp), filename=f"exec_{exec_id[:8]}_logs.json",
                         media_type="application/json")
 
+# ── Abas ──────────────────────────────────────────────────────────────────────
+
+@app.get("/api/tabs")
+async def list_tabs():
+    return await browser.list_tabs()
+
+@app.post("/api/tabs")
+async def new_tab(body: dict):
+    return await browser.new_tab(body.get("url", ""))
+
+@app.put("/api/tabs/{index}")
+async def switch_tab(index: int):
+    return await browser.switch_tab(index)
+
+@app.delete("/api/tabs/{index}")
+async def close_tab(index: int):
+    return await browser.close_tab(index)
+
 # ── Procedimentos ──────────────────────────────────────────────────────────────
 
 @app.get("/api/procedures")
@@ -255,35 +268,26 @@ async def list_procedures():
 @app.get("/api/procedures/{name}")
 async def get_procedure(name: str):
     p = procs.get_procedure(name)
-    if not p:
-        raise HTTPException(404)
+    if not p: raise HTTPException(404)
     return p
 
 @app.post("/api/procedures")
 async def create_procedure(body: dict):
-    return procs.save_procedure(
-        body["name"], body.get("description",""),
-        body.get("steps",[]), body.get("variables",[])
-    )
+    return procs.save_procedure(body["name"], body.get("description",""),
+                                body.get("steps",[]), body.get("variables",[]))
 
 @app.put("/api/procedures/{name}")
 async def update_procedure(name: str, body: dict):
     existing = procs.get_procedure(name)
-    if not existing:
-        raise HTTPException(404)
+    if not existing: raise HTTPException(404)
     return procs.save_procedure(
-        body.get("name", name),
-        body.get("description", existing.get("description","")),
+        body.get("name", name), body.get("description", existing.get("description","")),
         body.get("steps", existing.get("steps",[])),
-        body.get("variables", existing.get("variables",[])),
-        existing.get("id")
-    )
+        body.get("variables", existing.get("variables",[])), existing.get("id"))
 
 @app.delete("/api/procedures/{name}")
 async def delete_procedure(name: str):
-    ok = procs.delete_procedure(name)
-    if not ok:
-        raise HTTPException(404)
+    if not procs.delete_procedure(name): raise HTTPException(404)
     return {"deleted": True}
 
 # ── Anexos ─────────────────────────────────────────────────────────────────────
@@ -302,12 +306,11 @@ async def upload_attachment(file: UploadFile = File(...)):
 @app.delete("/api/attachments/{name}")
 async def delete_attachment(name: str):
     path = ATTACHMENTS_DIR / name
-    if not path.exists():
-        raise HTTPException(404)
+    if not path.exists(): raise HTTPException(404)
     path.unlink()
     return {"deleted": True}
 
-# ── Mídia ──────────────────────────────────────────────────────────────────────
+# ── Mídia e arquivos ───────────────────────────────────────────────────────────
 
 @app.get("/api/screenshots")
 async def list_screenshots():
@@ -316,8 +319,7 @@ async def list_screenshots():
 @app.get("/api/screenshots/{name}")
 async def get_screenshot(name: str):
     path = SCREENSHOTS_DIR / name
-    if not path.exists():
-        raise HTTPException(404)
+    if not path.exists(): raise HTTPException(404)
     return FileResponse(str(path), media_type="image/jpeg")
 
 @app.get("/api/videos")
@@ -327,24 +329,28 @@ async def list_videos():
 @app.get("/api/videos/{name}")
 async def get_video(name: str):
     path = VIDEOS_DIR / name
-    if not path.exists():
-        raise HTTPException(404)
+    if not path.exists(): raise HTTPException(404)
     return FileResponse(str(path), media_type="video/webm")
 
 @app.get("/api/files")
 async def list_files():
-    if not DOWNLOADS_DIR.exists():
-        return []
-    return [{"name": f.name, "size": f.stat().st_size, "url": f"/api/files/{f.name}"}
-            for f in sorted(DOWNLOADS_DIR.iterdir(), key=lambda x: -x.stat().st_mtime)
-            if f.is_file()]
+    return browser.list_downloads()
 
 @app.get("/api/files/{name}")
 async def download_file(name: str):
     path = DOWNLOADS_DIR / name
-    if not path.exists():
-        raise HTTPException(404)
+    if not path.exists(): raise HTTPException(404)
     return FileResponse(str(path), filename=name)
+
+@app.get("/api/logs")
+async def list_logs():
+    return browser.list_logs()
+
+@app.get("/api/logs/{name}")
+async def get_log(name: str):
+    path = LOGS_DIR / name
+    if not path.exists(): raise HTTPException(404)
+    return FileResponse(str(path), media_type="text/plain")
 
 # ── Frontend ───────────────────────────────────────────────────────────────────
 
