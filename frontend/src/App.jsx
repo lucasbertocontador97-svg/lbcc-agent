@@ -317,7 +317,7 @@ export default function App() {
       setEvents(prev => [...prev, ev]);
       return;
     }
-    if (["action","result","system","retry","paused","resumed","download"].includes(type)) {
+    if (["action","result","system","retry","paused","resumed","download","context"].includes(type)) {
       setEvents(prev => [...prev, ev]);
       if (type === "paused") setPaused(true);
       if (type === "resumed") setPaused(false);

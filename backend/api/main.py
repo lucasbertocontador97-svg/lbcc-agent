@@ -208,6 +208,8 @@ async def status():
     return {
         "ok": True,
         "browser_url":      browser.url,
+        "browser_profile":  getattr(browser, "_profile_name", "default"),
+        "browser_profile_dir": str(browser.profile_dir),
         "manual_mode":      browser.is_manual_mode,
         "paused":           browser.is_paused,
         "step_mode":        browser.is_step_mode,

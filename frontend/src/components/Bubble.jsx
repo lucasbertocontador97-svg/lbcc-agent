@@ -3,6 +3,7 @@ import { Icon } from "./Icons.jsx";
 const ACTION_LABELS = {
   navigate:      ["act-navigate", "navegar"],
   click:         ["act-click",    "clicar"],
+  click_text:    ["act-click",    "clicar texto"],
   fill:          ["act-fill",     "preencher"],
   wait:          ["act-wait",     "aguardar"],
   key:           ["act-other",    "tecla"],
@@ -73,7 +74,7 @@ export function Bubble({ event, onApprove, onCancel }) {
 
   if (type === "action") {
     const [cls, label] = ACTION_LABELS[event.action] || ["act-other", event.action];
-    const detail = event.url || event.selector || (event.value ? `"${event.value}"` : "") || event.key || "";
+    const detail = event.url || event.selector || event.text || (event.value ? `"${event.value}"` : "") || event.key || "";
     return (
       <div className="msg-row">
         <div className="avatar bot" style={{ opacity:.5 }}>🤖</div>
@@ -96,6 +97,25 @@ export function Bubble({ event, onApprove, onCancel }) {
             ? (event.title ? `${event.title} — ${event.url||""}` : "ok")
             : event.error?.substring(0,120)
           }
+        </div>
+      </div>
+    );
+  }
+
+  if (type === "context") {
+    const ctx = event.context || {};
+    const count = (arr) => Array.isArray(arr) ? arr.length : 0;
+    return (
+      <div className="msg-row">
+        <div style={{ width:32, flexShrink:0 }} />
+        <div className="context-card">
+          <div className="context-title">{ctx.title || "Contexto da pagina"}</div>
+          <div className="context-url">{ctx.url || ""}</div>
+          <div className="context-stats">
+            <span>{count(ctx.buttons)} botoes</span>
+            <span>{count(ctx.links)} links</span>
+            <span>{count(ctx.menus)} menus</span>
+          </div>
         </div>
       </div>
     );

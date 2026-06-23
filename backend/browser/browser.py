@@ -15,6 +15,7 @@ from playwright.async_api import async_playwright, BrowserContext, Page, Playwri
 
 DATA_DIR        = Path(__file__).parent.parent / "data"
 PROFILE_DIR     = DATA_DIR / "chrome_profile"
+PROFILES_DIR    = DATA_DIR / "profiles"
 DOWNLOADS_DIR   = DATA_DIR / "downloads"
 SCREENSHOTS_DIR = DATA_DIR / "screenshots"
 VIDEOS_DIR      = DATA_DIR / "videos"
@@ -50,20 +51,39 @@ class Browser:
         self.current_exec_id: Optional[str] = None
         self._exec_screenshot_count = 0
         self.last_downloads: list[str] = []
+        self._download_callbacks = []
+        self._headless = True
+        self._profile_name = "default"
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
-    async def start(self, headless: bool = True):
-        for d in [PROFILE_DIR, DOWNLOADS_DIR, SCREENSHOTS_DIR,
+    async def start(self, headless: bool = True, profile_name: str = "default"):
+        for d in [PROFILE_DIR, PROFILES_DIR, DOWNLOADS_DIR, SCREENSHOTS_DIR,
                   VIDEOS_DIR, ATTACHMENTS_DIR, LOGS_DIR]:
             d.mkdir(parents=True, exist_ok=True)
 
         self._pw = await async_playwright().start()
+        self._headless = headless
+        await self._launch_context(profile_name, headless)
+        self._log("start", {"tabs": len(self._pages), "profile": self._profile_name})
+        print(f"[browser] Chromium iniciado. Perfil persistente em: {self.profile_dir}")
+        return
+
+    @property
+    def profile_dir(self) -> Path:
+        if self._profile_name == "default":
+            return PROFILE_DIR
+        return PROFILES_DIR / self._profile_name
+
+    async def _launch_context(self, profile_name: str, headless: bool):
+        self._profile_name = profile_name
+        profile_dir = PROFILE_DIR if profile_name == "default" else PROFILES_DIR / profile_name
+        profile_dir.mkdir(parents=True, exist_ok=True)
 
         # Chromium do Replit se disponível
         replit_chrome = os.getenv("REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE", "")
         launch_kwargs = dict(
-            user_data_dir=str(PROFILE_DIR),
+            user_data_dir=str(profile_dir),
             headless=headless,
             slow_mo=80,
             viewport={"width": 1366, "height": 768},
@@ -98,13 +118,33 @@ class Browser:
             self._pages = [page]
 
         self._active_idx = 0
-        self._setup_page_events(self._pages[0])
+        for page in self._pages:
+            self._setup_page_events(page)
 
         # Listener para novas abas criadas por links/popups
         self._ctx.on("page", self._on_new_page)
 
-        self._log("start", {"tabs": len(self._pages)})
-        print(f"[browser] Chromium iniciado. Perfil persistente em: {PROFILE_DIR}")
+        self._log("profile_ready", {"tabs": len(self._pages), "profile": self._profile_name})
+
+    async def use_profile(self, profile_name: str) -> dict:
+        safe_name = "".join(c for c in profile_name.lower() if c.isalnum() or c in ("-", "_"))[:40]
+        if not safe_name:
+            safe_name = "default"
+        if safe_name == self._profile_name and self._ctx:
+            return {"ok": True, "profile": self._profile_name, "path": str(self.profile_dir)}
+
+        async with self._lock:
+            try:
+                if self._ctx:
+                    await self._ctx.close()
+                self._ctx = None
+                self._pages = []
+                self._active_idx = 0
+                await self._launch_context(safe_name, self._headless)
+                self._log("switch_profile", {"profile": safe_name, "path": str(self.profile_dir)})
+                return {"ok": True, "profile": safe_name, "path": str(self.profile_dir)}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
 
     async def stop(self):
         if self._ctx:
@@ -376,6 +416,38 @@ class Browser:
 
             return {"ok": False, "error": last_error[:200]}
 
+    async def click_text(self, text: str, timeout: int = 10000) -> dict:
+        async with self._lock:
+            wanted = (text or "").strip()
+            if not wanted:
+                return {"ok": False, "error": "Texto vazio"}
+
+            attempts = [
+                f"role=button[name='{wanted}']",
+                f"role=link[name='{wanted}']",
+                f"text={wanted}",
+                f"a:has-text('{wanted}')",
+                f"button:has-text('{wanted}')",
+                f"[role=button]:has-text('{wanted}')",
+                f"[role=menuitem]:has-text('{wanted}')",
+                f"span:has-text('{wanted}')",
+            ]
+            last_error = ""
+            for sel in attempts:
+                try:
+                    locator = self._page.locator(sel).first
+                    await locator.wait_for(state="visible", timeout=timeout)
+                    await locator.click(timeout=timeout)
+                    try:
+                        await self._page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                    except Exception:
+                        pass
+                    self._log("click_text", {"text": wanted, "selector": sel})
+                    return {"ok": True, "text": wanted, "selector": sel}
+                except Exception as e:
+                    last_error = str(e)
+            return {"ok": False, "text": wanted, "error": last_error[:300]}
+
     async def fill(self, selector: str, value: str) -> dict:
         async with self._lock:
             try:
@@ -492,6 +564,44 @@ class Browser:
                     "tabs": tabs, "active_tab": self._active_idx}
         except Exception as e:
             return {"ok": False, "error": str(e), "url": ""}
+
+    async def get_page_context(self) -> dict:
+        try:
+            data = await self._page.evaluate("""() => {
+                const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+                const visible = el => {
+                    const style = window.getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return style.visibility !== 'hidden'
+                        && style.display !== 'none'
+                        && r.width > 0
+                        && r.height > 0;
+                };
+                const textOf = el => clean(
+                    el.innerText || el.textContent || el.value ||
+                    el.placeholder || el.getAttribute('aria-label') || el.title || ''
+                );
+                const uniq = values => [...new Set(values.map(clean).filter(Boolean))].slice(0, 80);
+                const buttons = uniq(Array.from(document.querySelectorAll(
+                    'button, input[type=button], input[type=submit], [role=button]'
+                )).filter(visible).map(textOf));
+                const links = uniq(Array.from(document.querySelectorAll('a, [role=link]'))
+                    .filter(visible)
+                    .map(el => textOf(el) || el.href));
+                const menus = uniq(Array.from(document.querySelectorAll(
+                    'nav, aside, [role=menu], [role=menubar], [role=menuitem], .menu, [class*=menu], [class*=nav]'
+                )).filter(visible).flatMap(el => clean(el.innerText).split('\\n')));
+                return {buttons, links, menus};
+            }""")
+            return {
+                "url": self._page.url,
+                "title": await self._page.title(),
+                "buttons": data.get("buttons", []),
+                "links": data.get("links", []),
+                "menus": data.get("menus", []),
+            }
+        except Exception as e:
+            return {"url": "", "title": "", "buttons": [], "links": [], "menus": [], "error": str(e)}
 
     @property
     def url(self) -> str:

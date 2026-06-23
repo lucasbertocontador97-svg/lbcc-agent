@@ -3,6 +3,7 @@ Agente — Fase 3: abas, downloads, uploads, login persistente.
 """
 import asyncio
 import json
+import os
 import time
 import uuid
 from typing import AsyncGenerator, Optional
@@ -16,6 +17,9 @@ from backend.procedures import manager as procs
 TIMEOUT_SECONDS = 180
 MAX_RETRIES     = 3
 RETRY_DELAY_S   = 2
+ACTION_TIMEOUT_SECONDS = 35
+IOB_PROFILE = "iob"
+IOB_URL = os.getenv("IOB_URL", "https://www.iobonline.com.br/")
 
 SYSTEM = """Você é o Agente Operacional LBCC.
 Você controla um navegador Chrome real. Cookies e logins são mantidos entre sessões.
@@ -24,6 +28,7 @@ Você controla um navegador Chrome real. Cookies e logins são mantidos entre se
 
 {"action": "navigate",      "url": "https://..."}
 {"action": "click",         "selector": "texto ou css"}
+{"action": "click_text",    "text": "texto visivel"}
 {"action": "fill",          "selector": "css", "value": "texto"}
 {"action": "key",           "key": "Enter"}
 {"action": "scroll",        "direction": "down", "amount": 500}
@@ -76,6 +81,7 @@ class Agent:
         from dotenv import load_dotenv
         load_dotenv()
         self._client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self._iob_url = os.getenv("IOB_URL", IOB_URL)
 
     async def run(
         self,
@@ -88,6 +94,12 @@ class Agent:
 
         deadline  = time.time() + TIMEOUT_SECONDS
         variables = variables or {}
+
+        iob_command = self._classify_iob_command(user_message)
+        if iob_command:
+            async for event in self._run_iob_command(iob_command, conv_id, exec_id):
+                yield event
+            return
 
         # ── Tentar replay de procedimento ──────────────────────────────────────
         proc = self._find_procedure(user_message)
@@ -129,6 +141,7 @@ class Agent:
                 yield {"type": "resumed", "text": "Retomado."}
 
             state = await browser.page_state()
+            page_context = await browser.get_page_context()
             tabs_info = ""
             if state.get("tabs"):
                 tabs_info = f"\nAbas abertas: {json.dumps(state['tabs'], ensure_ascii=False)}"
@@ -140,6 +153,7 @@ class Agent:
                 f"Aba ativa: {state.get('active_tab', 0)}{tabs_info}\n"
                 f"Elementos ({len(state.get('elements',[]))}): "
                 f"{json.dumps(state.get('elements',[])[:12], ensure_ascii=False)}\n"
+                f"Contexto: {json.dumps(page_context, ensure_ascii=False)[:1600]}\n"
                 f"Texto: {state.get('body','')[:800]}"
             )
 
@@ -188,6 +202,141 @@ class Agent:
 
         yield {"type": "error", "text": "Limite de 40 iterações atingido."}
 
+    def _classify_iob_command(self, msg: str) -> Optional[str]:
+        m = msg.lower().strip()
+        if m in ("parar", "stop"):
+            return "stop"
+        if "iob" not in m and "folha" not in m and "login" not in m:
+            return None
+        if "abrir" in m and "iob" in m:
+            return "open_iob"
+        if "login" in m:
+            return "login_iob"
+        if "folha" in m:
+            return "go_payroll"
+        return None
+
+    async def _run_iob_command(
+        self, command: str, conv_id: str, exec_id: str
+    ) -> AsyncGenerator[dict, None]:
+        if command == "stop":
+            browser.request_stop()
+            yield {"type": "stopped", "text": "Execucao interrompida."}
+            return
+
+        profile = await browser.use_profile(IOB_PROFILE)
+        yield {"type": "system", "text": f"Perfil IOB ativo: {profile.get('path', '')}"}
+        if not profile.get("ok"):
+            yield {"type": "error", "text": profile.get("error", "Falha ao abrir perfil IOB.")}
+            return
+
+        if command == "open_iob":
+            async for event in self._execute_cmd({"action": "navigate", "url": self._iob_url}, conv_id, exec_id):
+                yield event
+            yield {"type": "done", "text": "IOB aberto com perfil persistente dedicado."}
+            return
+
+        if command == "login_iob":
+            context = await browser.get_page_context()
+            if "iob" not in (context.get("url", "") + context.get("title", "")).lower():
+                async for event in self._execute_cmd({"action": "navigate", "url": self._iob_url}, conv_id, exec_id):
+                    yield event
+
+            context = await browser.get_page_context()
+            yield {"type": "context", "context": context}
+            if self._looks_logged_in(context):
+                yield {"type": "done", "text": "Login do IOB ja parece ativo."}
+                return
+
+            login_clicked = False
+            for text in ("Entrar", "Login", "Acessar", "Acesse", "Minha conta"):
+                async for event in self._execute_cmd({"action": "click_text", "text": text}, conv_id, exec_id):
+                    yield event
+                    if event.get("type") == "result" and event.get("ok"):
+                        login_clicked = True
+                if login_clicked:
+                    break
+
+            context = await browser.get_page_context()
+            yield {"type": "context", "context": context}
+            if self._looks_logged_in(context):
+                yield {"type": "done", "text": "Login do IOB confirmado."}
+                return
+
+            yield {
+                "type": "ask",
+                "text": "Preciso de intervencao humana para concluir o login do IOB. Entre manualmente e aprove para continuar.",
+            }
+            approved = await browser.request_approval("Conclua o login do IOB no navegador e aprove para continuar.")
+            if not approved:
+                yield {"type": "stopped", "text": "Login do IOB interrompido pelo usuario."}
+                return
+            yield {"type": "done", "text": "Login do IOB registrado no perfil persistente."}
+            return
+
+        if command == "go_payroll":
+            context = await browser.get_page_context()
+            if "iob" not in (context.get("url", "") + context.get("title", "")).lower():
+                async for event in self._run_iob_command("open_iob", conv_id, exec_id):
+                    if event.get("type") != "done":
+                        yield event
+
+            for text in ("Folha", "Folha de Pagamento", "Departamento Pessoal", "DP"):
+                if browser.should_stop:
+                    yield {"type": "stopped", "text": "Execucao interrompida."}
+                    return
+                async for event in self._execute_cmd({"action": "click_text", "text": text}, conv_id, exec_id):
+                    yield event
+                    if event.get("type") == "result" and event.get("ok"):
+                        final_context = await browser.get_page_context()
+                        yield {"type": "context", "context": final_context}
+                        yield {"type": "done", "text": "Navegacao para Folha executada sem emitir notas ou transmitir dados."}
+                        return
+
+            yield {
+                "type": "ask",
+                "text": "Nao encontrei o menu Folha com seguranca. Posso aguardar sua navegacao manual ate a tela de Folha?",
+            }
+            approved = await browser.request_approval("Abra manualmente o menu Folha e aprove para registrar o estado.")
+            if not approved:
+                yield {"type": "stopped", "text": "Navegacao para Folha interrompida."}
+                return
+            final_context = await browser.get_page_context()
+            yield {"type": "context", "context": final_context}
+            yield {"type": "done", "text": "Tela de Folha registrada para observacao."}
+
+    def _looks_logged_in(self, context: dict) -> bool:
+        haystack = " ".join(
+            [context.get("url", ""), context.get("title", "")]
+            + context.get("buttons", [])
+            + context.get("links", [])
+            + context.get("menus", [])
+        ).lower()
+        return any(token in haystack for token in ("sair", "logout", "minha conta", "folha", "dashboard"))
+
+    async def _send_context_to_gpt(self, objective: str, action: dict, context: dict) -> Optional[str]:
+        try:
+            resp = await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "Voce observa navegacao web. Responda JSON curto com risco e sugestao. Nao solicite acoes criticas."},
+                        {"role": "user", "content": json.dumps({
+                            "objective": objective,
+                            "next_action": action,
+                            "context": context,
+                        }, ensure_ascii=False)},
+                    ],
+                    temperature=0,
+                    max_tokens=180,
+                    response_format={"type": "json_object"},
+                ),
+                timeout=12,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception:
+            return None
+
     async def _handle_tab_command(self, msg: str) -> Optional[dict]:
         """Interpreta comandos de abas em linguagem natural."""
         m = msg.lower().strip()
@@ -232,6 +381,9 @@ class Agent:
         self, cmd: dict, conv_id: str, exec_id: str
     ) -> AsyncGenerator[dict, None]:
         action = cmd.get("action", "")
+        async for event in self._execute_cmd_v4(cmd, conv_id, exec_id):
+            yield event
+        return
 
         if action == "done":
             ss = await browser.screenshot("resultado_final")
@@ -320,6 +472,133 @@ class Agent:
 
         await db.save_action_log(str(uuid.uuid4()), conv_id, exec_id,
                                  action, cmd, result, result.get("ok", False))
+
+    async def _execute_cmd_v4(
+        self, cmd: dict, conv_id: str, exec_id: str
+    ) -> AsyncGenerator[dict, None]:
+        action = cmd.get("action", "")
+
+        if action == "done":
+            ss = await browser.screenshot("resultado_final")
+            if ss.get("ok") and ss.get("b64"):
+                yield {"type": "screenshot", "b64": ss["b64"], "label": "Resultado final"}
+            yield {"type": "done", "text": cmd.get("message", "Concluido.")}
+            await db.save_action_log(str(uuid.uuid4()), conv_id, exec_id,
+                                     "done", {}, {"message": cmd.get("message")}, True)
+            return
+
+        if action == "ask":
+            yield {"type": "ask", "text": cmd.get("message", "")}
+            approved = await browser.request_approval(cmd.get("message", ""))
+            yield {"type": "system" if approved else "stopped",
+                   "text": "Aprovado. Continuando..." if approved else "Rejeitado pelo usuario."}
+            return
+
+        if action == "error":
+            yield {"type": "error", "text": cmd.get("message", "Erro.")}
+            return
+
+        context_before = await browser.get_page_context()
+        yield {"type": "context", "context": context_before}
+        gpt_hint = await self._send_context_to_gpt("executar acao de navegacao", cmd, context_before)
+        if gpt_hint:
+            yield {"type": "system", "text": f"Contexto enviado ao GPT: {gpt_hint[:220]}"}
+
+        yield {"type": "action", **cmd}
+        ss_before = await browser.screenshot(f"before_{action}")
+        if ss_before.get("ok") and ss_before.get("b64"):
+            yield {"type": "screenshot", "b64": ss_before["b64"], "label": f"Antes: {action}"}
+
+        label = action
+        if action == "navigate":
+            label = f"nav_{cmd.get('url','')[:30]}"
+        elif action == "click":
+            label = f"click_{cmd.get('selector','')[:25]}"
+        elif action == "click_text":
+            label = f"click_text_{cmd.get('text','')[:25]}"
+        elif action == "fill":
+            label = f"fill_{cmd.get('selector','')[:20]}"
+
+        result = {"ok": False, "error": "Nao executado"}
+        for attempt in range(MAX_RETRIES):
+            if browser.should_stop:
+                yield {"type": "stopped", "text": "Execucao interrompida."}
+                return
+            try:
+                result = await asyncio.wait_for(
+                    self._perform_action_once(action, cmd),
+                    timeout=ACTION_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                result = {"ok": False, "error": f"Timeout da acao apos {ACTION_TIMEOUT_SECONDS}s"}
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+
+            if result.get("ok"):
+                break
+            if attempt < MAX_RETRIES - 1:
+                yield {"type": "retry", "text": f"Retry {attempt+1}/{MAX_RETRIES}: {result.get('error','falha')}"}
+                await asyncio.sleep(RETRY_DELAY_S)
+
+        if action == "download" and result.get("ok"):
+            yield {"type": "system", "text": f"Download salvo: {result.get('filename')}"}
+        if action == "list_tabs" and result.get("tabs"):
+            yield {"type": "system",
+                   "text": "Abas: " + " | ".join(
+                       f"[{t['index']}]{'*' if t['active'] else ''} {t['title'][:30]}"
+                       for t in result["tabs"]
+                   )}
+
+        yield {"type": "result", **result}
+
+        ss_after = await browser.screenshot(f"after_{label}")
+        if ss_after.get("ok") and ss_after.get("b64"):
+            yield {"type": "screenshot", "b64": ss_after["b64"], "label": f"Depois: {label}"}
+
+        context_after = await browser.get_page_context()
+        yield {"type": "context", "context": context_after}
+
+        await db.save_action_log(str(uuid.uuid4()), conv_id, exec_id,
+                                 action, {**cmd, "context_before": context_before},
+                                 {**result, "context_after": context_after}, result.get("ok", False))
+
+    async def _perform_action_once(self, action: str, cmd: dict) -> dict:
+        if action == "navigate":
+            return await browser.navigate(cmd.get("url", ""))
+        if action == "click":
+            return await browser.click(cmd.get("selector", ""))
+        if action == "click_text":
+            return await browser.click_text(cmd.get("text", ""))
+        if action == "fill":
+            return await browser.fill(cmd.get("selector", ""), cmd.get("value", ""))
+        if action == "key":
+            return await browser.key(cmd.get("key", ""))
+        if action == "scroll":
+            return await browser.scroll(cmd.get("direction", "down"), cmd.get("amount", 500))
+        if action == "wait":
+            return await browser.wait(cmd.get("ms", 1000))
+        if action == "wait_selector":
+            return await browser.wait_selector(cmd.get("selector", ""), cmd.get("timeout", 15000))
+        if action == "select":
+            return await browser.select_option(cmd.get("selector", ""), cmd.get("value", ""))
+        if action == "hover":
+            return await browser.hover(cmd.get("selector", ""))
+        if action == "upload":
+            return await browser.upload_file(cmd.get("selector", ""), cmd.get("file", ""))
+        if action == "download":
+            return await browser.download_file(cmd.get("url", ""), cmd.get("filename", ""))
+        if action == "screenshot":
+            ss = await browser.screenshot("manual")
+            return {"ok": ss.get("ok", False), "filename": ss.get("filename")}
+        if action == "new_tab":
+            return await browser.new_tab(cmd.get("url", ""))
+        if action == "switch_tab":
+            return await browser.switch_tab(cmd.get("index", 0))
+        if action == "close_tab":
+            return await browser.close_tab(cmd.get("index"))
+        if action == "list_tabs":
+            return {"ok": True, "tabs": await browser.list_tabs()}
+        return {"ok": False, "error": f"Acao desconhecida: {action}"}
 
     async def _replay(self, proc: dict, conv_id: str,
                       exec_id: str, variables: dict) -> AsyncGenerator[dict, None]:
