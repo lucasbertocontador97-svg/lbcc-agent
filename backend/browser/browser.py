@@ -55,6 +55,14 @@ class Browser:
         self._download_callbacks = []
         self._headless = True
         self._profile_name = "default"
+        self._teaching = False
+        self._teaching_name = ""
+        self._teaching_description = ""
+        self._teaching_steps: list[dict] = []
+        self._teaching_started_at = ""
+        self._teaching_last_sig = ""
+        self._teaching_last_ts = 0.0
+        self._teaching_binding_ready = False
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -108,6 +116,8 @@ class Browser:
             print(f"[browser] Usando Chromium do Replit: {replit_chrome}")
 
         self._ctx = await self._pw.chromium.launch_persistent_context(**launch_kwargs)
+        self._teaching_binding_ready = False
+        await self._ensure_teaching_binding()
 
         # Restaurar abas existentes ou criar uma nova
         existing = self._ctx.pages
@@ -121,6 +131,7 @@ class Browser:
         self._active_idx = 0
         for page in self._pages:
             self._setup_page_events(page)
+            await self._install_teaching_hooks(page)
 
         # Listener para novas abas criadas por links/popups
         self._ctx.on("page", self._on_new_page)
@@ -155,13 +166,16 @@ class Browser:
 
     def _setup_page_events(self, page: Page):
         page.on("download", lambda dl: asyncio.create_task(self._on_download(dl)))
+        page.on("framenavigated", lambda frame: asyncio.create_task(self._on_frame_navigated(frame)))
 
     async def _on_new_page(self, page: Page):
         """Captura novas abas abertas automaticamente."""
         self._pages.append(page)
         self._setup_page_events(page)
+        await self._install_teaching_hooks(page)
         self._log("new_tab", {"url": page.url, "index": len(self._pages) - 1})
         print(f"[browser] Nova aba aberta: {page.url}")
+        await self.record_teaching_action("new_tab", {"url": page.url}, {"ok": True})
 
     async def _on_download(self, download):
         name = download.suggested_filename
@@ -176,6 +190,10 @@ class Browser:
         }
         self.last_downloads.append(info)
         self._log("download", info)
+        await self.record_teaching_action("download", {
+            "url": download.url,
+            "filename": name,
+        }, {"ok": True, **info})
         print(f"[browser] Download: {dest} ({size} bytes)")
         # Notificar callbacks registrados
         for cb in self._download_callbacks:
@@ -194,6 +212,152 @@ class Browser:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             pass
+
+    async def start_teaching(self, name: str, description: str = "") -> dict:
+        from backend.procedures import manager as procs
+
+        safe_name = procs.sanitize_name(name)
+        self._teaching = True
+        self._teaching_name = safe_name
+        self._teaching_description = description or f"Procedimento ensinado: {safe_name}"
+        self._teaching_steps = []
+        self._teaching_started_at = datetime.now().isoformat()
+        self._teaching_last_sig = ""
+        self._teaching_last_ts = 0.0
+        await self._ensure_teaching_binding()
+        for page in list(self._pages):
+            await self._install_teaching_hooks(page)
+        await self.record_teaching_action("navigate", {"url": self.url}, {"ok": True})
+        self._log("teaching_start", {"name": safe_name, "description": self._teaching_description})
+        return {
+            "ok": True,
+            "name": safe_name,
+            "description": self._teaching_description,
+            "started_at": self._teaching_started_at,
+        }
+
+    async def stop_teaching(self) -> dict:
+        from backend.procedures import manager as procs
+
+        if not self._teaching:
+            return {"ok": False, "error": "Modo ensinar nao esta ativo."}
+        name = self._teaching_name
+        description = self._teaching_description
+        steps = list(self._teaching_steps)
+        self._teaching = False
+        self._teaching_name = ""
+        self._teaching_description = ""
+        self._teaching_steps = []
+        proc = procs.save_procedure(
+            name,
+            description,
+            steps,
+            extra={
+                "source": "teach_mode",
+                "taught_at": self._teaching_started_at,
+                "last_status": "gravado",
+            },
+        )
+        self._log("teaching_stop", {"name": proc.get("name"), "steps": len(steps)})
+        return {"ok": True, "procedure": proc, "steps_count": len(steps)}
+
+    def teaching_status(self) -> dict:
+        return {
+            "active": self._teaching,
+            "name": self._teaching_name,
+            "description": self._teaching_description,
+            "steps_count": len(self._teaching_steps),
+            "started_at": self._teaching_started_at,
+        }
+
+    async def record_teaching_action(self, action: str, cmd: dict, result: dict = None) -> dict:
+        if not self._teaching:
+            return {"ok": False, "recorded": False}
+        result = result or {}
+        if result and result.get("ok") is False:
+            return {"ok": False, "recorded": False}
+        step = {
+            "type": action,
+            "action": action,
+            "url": cmd.get("url", self.url if action == "navigate" else ""),
+            "selector": cmd.get("selector", ""),
+            "text": cmd.get("text", ""),
+            "value": cmd.get("value", ""),
+            "wait_for": cmd.get("wait_for", ""),
+        }
+        if action == "click_text" and not step["text"]:
+            step["text"] = cmd.get("selector", "")
+        if action == "key":
+            step["key"] = cmd.get("key", "")
+        if action == "wait":
+            step["ms"] = cmd.get("ms", 1000)
+        if action == "select":
+            step["value"] = cmd.get("value", "")
+        if action == "upload":
+            step["file"] = cmd.get("file", "")
+        if action == "download":
+            step["filename"] = cmd.get("filename", result.get("filename", ""))
+            step["url"] = cmd.get("url", result.get("url", ""))
+        await self._record_teaching_step(step)
+        return {"ok": True, "recorded": True}
+
+    async def _record_teaching_step(self, payload: dict) -> dict:
+        if not self._teaching:
+            return {"ok": False, "recorded": False}
+        step_type = payload.get("type") or payload.get("action") or "click"
+        if step_type in ("mousemove", "mouseover", "focus"):
+            return {"ok": False, "recorded": False}
+        step = {
+            "type": step_type,
+            "action": step_type,
+            "url": payload.get("url", self.url if step_type == "navigate" else ""),
+            "selector": payload.get("selector", ""),
+            "text": payload.get("text", ""),
+            "value": payload.get("value", ""),
+            "wait_for": payload.get("wait_for", ""),
+        }
+        for key in ("href", "key", "ms", "file", "filename"):
+            if payload.get(key) not in (None, ""):
+                step[key] = payload.get(key)
+        if step_type == "navigate" and not step.get("url"):
+            step["url"] = self.url
+        if step_type in ("fill", "select") and step.get("value") == "":
+            return {"ok": False, "recorded": False}
+        sig = json.dumps({
+            "type": step.get("type"),
+            "url": step.get("url"),
+            "selector": step.get("selector"),
+            "text": step.get("text"),
+            "value": step.get("value"),
+        }, ensure_ascii=False, sort_keys=True)
+        now = time.time()
+        previous_ts = self._teaching_last_ts
+        if sig == self._teaching_last_sig and now - self._teaching_last_ts < 1.2:
+            return {"ok": True, "recorded": False, "deduped": True}
+        self._teaching_last_sig = sig
+        self._teaching_last_ts = now
+        if previous_ts:
+            gap_ms = int((now - previous_ts) * 1000)
+            if gap_ms >= 2000:
+                self._teaching_steps.append({
+                    "type": "wait",
+                    "action": "wait",
+                    "ms": min(gap_ms, 30000),
+                })
+
+        try:
+            ss = await self.screenshot(f"teach_{step_type}")
+            if ss.get("ok"):
+                step["screenshot"] = ss.get("filename", "")
+        except Exception:
+            pass
+        self._teaching_steps.append({k: v for k, v in step.items() if v not in ("", None)})
+        self._log("teaching_step", {
+            "name": self._teaching_name,
+            "index": len(self._teaching_steps),
+            "step": self._teaching_steps[-1],
+        })
+        return {"ok": True, "recorded": True, "step": self._teaching_steps[-1]}
 
     # ── Aba ativa ──────────────────────────────────────────────────────────────
 
@@ -1005,6 +1169,113 @@ class Browser:
                 "submitted": bool(clicked_selector),
             })
             return result
+
+    async def _on_frame_navigated(self, frame):
+        try:
+            if frame == self._page.main_frame:
+                await self.record_teaching_action("navigate", {"url": frame.url}, {"ok": True})
+        except Exception:
+            pass
+
+    async def _ensure_teaching_binding(self):
+        if not self._ctx or self._teaching_binding_ready:
+            return
+        try:
+            await self._ctx.expose_binding("__lbccTeachRecord", self._on_teach_binding)
+            self._teaching_binding_ready = True
+        except Exception:
+            self._teaching_binding_ready = True
+
+    async def _on_teach_binding(self, source, payload):
+        try:
+            await self._record_teaching_step(payload or {})
+        except Exception:
+            pass
+
+    async def _install_teaching_hooks(self, page: Page):
+        try:
+            await page.add_init_script(self._teaching_observer_script())
+        except Exception:
+            pass
+        try:
+            await page.evaluate(self._teaching_observer_script())
+        except Exception:
+            pass
+
+    def _teaching_observer_script(self) -> str:
+        return r"""(() => {
+            if (window.__lbccTeachInstalled) return;
+            window.__lbccTeachInstalled = true;
+            const clean = value => (value || '').replace(/\s+/g, ' ').trim();
+            const cssEscape = value => {
+                try { return CSS.escape(value); } catch (_) { return String(value).replace(/"/g, '\\"'); }
+            };
+            const textOf = el => clean(
+                el.innerText || el.textContent || el.value || el.placeholder ||
+                el.getAttribute('aria-label') || el.title || ''
+            ).slice(0, 140);
+            const selectorFor = el => {
+                if (!el || !el.tagName) return '';
+                const tag = el.tagName.toLowerCase();
+                const testid = el.getAttribute('data-testid');
+                if (testid) return `[data-testid="${cssEscape(testid)}"]`;
+                if (el.id) return `#${cssEscape(el.id)}`;
+                const name = el.getAttribute('name');
+                if (name) return `${tag}[name="${cssEscape(name)}"]`;
+                const aria = el.getAttribute('aria-label');
+                if (aria) return `${tag}[aria-label="${cssEscape(aria)}"]`;
+                const placeholder = el.getAttribute('placeholder');
+                if (placeholder) return `${tag}[placeholder="${cssEscape(placeholder)}"]`;
+                const txt = textOf(el);
+                if (txt && ['button', 'a'].includes(tag)) return `${tag}:has-text("${cssEscape(txt.slice(0, 60))}")`;
+                if (txt && el.getAttribute('role') === 'button') return `[role=button]:has-text("${cssEscape(txt.slice(0, 60))}")`;
+                return tag;
+            };
+            const send = payload => {
+                if (!window.__lbccTeachRecord) return;
+                payload.url = location.href;
+                payload.title = document.title;
+                window.__lbccTeachRecord(payload).catch(() => {});
+            };
+            const inputTimers = new WeakMap();
+            document.addEventListener('click', event => {
+                const el = event.target && event.target.closest
+                    ? event.target.closest('button,a,[role=button],[role=link],[role=menuitem],input,select,textarea,label')
+                    : event.target;
+                if (!el) return;
+                const tag = (el.tagName || '').toLowerCase();
+                const type = tag === 'a' ? 'click_text' : 'click';
+                send({type, selector: selectorFor(el), text: textOf(el), href: el.href || ''});
+            }, true);
+            document.addEventListener('input', event => {
+                const el = event.target;
+                if (!el || !['INPUT', 'TEXTAREA'].includes(el.tagName)) return;
+                clearTimeout(inputTimers.get(el));
+                inputTimers.set(el, setTimeout(() => {
+                    const inputType = (el.getAttribute('type') || '').toLowerCase();
+                    send({
+                        type: 'fill',
+                        selector: selectorFor(el),
+                        text: textOf(el),
+                        value: inputType === 'password' ? '{password}' : (el.value || '')
+                    });
+                }, 600));
+            }, true);
+            document.addEventListener('change', event => {
+                const el = event.target;
+                if (!el) return;
+                if (el.tagName === 'SELECT') {
+                    send({type: 'select', selector: selectorFor(el), value: el.value || '', text: textOf(el)});
+                }
+                if (el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'file') {
+                    send({
+                        type: 'upload',
+                        selector: selectorFor(el),
+                        file: Array.from(el.files || []).map(file => file.name).join(', ')
+                    });
+                }
+            }, true);
+        })()"""
 
     async def _fill_first_visible(self, selectors: list[str], value: str) -> str:
         for selector in selectors:

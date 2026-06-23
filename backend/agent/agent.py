@@ -8,6 +8,7 @@ import re
 import time
 import unicodedata
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 from urllib.parse import urlparse
@@ -103,6 +104,12 @@ class Agent:
         deadline  = time.time() + TIMEOUT_SECONDS
         variables = variables or {}
 
+        teach_command = self._classify_teach_command(user_message)
+        if teach_command:
+            async for event in self._run_teach_command(teach_command, user_message):
+                yield event
+            return
+
         iob_command = self._classify_iob_command(user_message)
         if iob_command:
             async for event in self._run_iob_command(iob_command, conv_id, exec_id, user_message):
@@ -114,7 +121,7 @@ class Agent:
         if proc:
             yield {"type": "system",
                    "text": f"📋 Procedimento '{proc['name']}' encontrado. Executando..."}
-            async for event in self._replay(proc, conv_id, exec_id, variables):
+            async for event in self._replay_v5(proc, conv_id, exec_id, variables):
                 yield event
             return
 
@@ -241,6 +248,53 @@ class Agent:
         if "folha" in m:
             return "go_payroll"
         return None
+
+    def _classify_teach_command(self, msg: str) -> Optional[str]:
+        normalized = self._norm(msg)
+        if "status modo ensinar" in normalized:
+            return "status"
+        if any(token in normalized for token in (
+            "parar modo ensinar",
+            "sair do modo ensinar",
+            "finalizar modo ensinar",
+            "encerrar modo ensinar",
+            "salvar procedimento",
+        )):
+            return "stop"
+        if any(token in normalized for token in (
+            "entrar em modo ensinar",
+            "iniciar modo ensinar",
+            "ativar modo ensinar",
+            "comecar modo ensinar",
+            "começar modo ensinar",
+            "modo ensinar",
+        )):
+            return "start"
+        return None
+
+    async def _run_teach_command(self, command: str, user_message: str) -> AsyncGenerator[dict, None]:
+        if command == "start":
+            name = procs.infer_name_from_text(user_message)
+            if not name:
+                name = f"procedimento_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            result = await browser.start_teaching(name, f"Procedimento ensinado por demonstracao: {name}")
+            yield {"type": "system", "text": f"Modo ensinar ativo: {result.get('name')}."}
+            yield {"type": "teach_status", **browser.teaching_status()}
+            return
+        if command == "stop":
+            result = await browser.stop_teaching()
+            if result.get("ok"):
+                proc = result.get("procedure", {})
+                yield {
+                    "type": "done",
+                    "text": f"Procedimento '{proc.get('name')}' salvo com {result.get('steps_count', 0)} passo(s).",
+                    "procedure": proc,
+                }
+            else:
+                yield {"type": "error", "text": result.get("error", "Falha ao parar modo ensinar.")}
+            yield {"type": "teach_status", **browser.teaching_status()}
+            return
+        yield {"type": "teach_status", **browser.teaching_status()}
 
     def _norm(self, value: str) -> str:
         return "".join(
@@ -961,6 +1015,9 @@ class Agent:
         context_after = await browser.get_page_context()
         yield {"type": "context", "context": context_after}
 
+        if result.get("ok"):
+            await browser.record_teaching_action(action, cmd, result)
+
         await db.save_action_log(str(uuid.uuid4()), conv_id, exec_id,
                                  action, {**cmd, "context_before": context_before},
                                  {**result, "context_after": context_after}, result.get("ok", False))
@@ -1002,6 +1059,128 @@ class Agent:
         if action == "list_tabs":
             return {"ok": True, "tabs": await browser.list_tabs()}
         return {"ok": False, "error": f"Acao desconhecida: {action}"}
+
+    async def _replay_v5(self, proc: dict, conv_id: str,
+                         exec_id: str, variables: dict) -> AsyncGenerator[dict, None]:
+        steps = procs.apply_variables(proc.get("steps", []), variables)
+        total = len(steps)
+        proc_name = proc.get("name", "")
+        for i, raw_step in enumerate(steps):
+            cmd = procs.step_to_cmd(raw_step)
+            if browser.should_stop:
+                yield {"type": "stopped", "text": "Replay interrompido."}
+                procs.record_execution(proc_name, "interrompido")
+                return
+            if browser.is_step_mode:
+                yield {"type": "step_waiting", "text": f"Passo {i+1}/{total}: {cmd.get('action')}"}
+                await browser.wait_for_step()
+                if browser.should_stop:
+                    procs.record_execution(proc_name, "interrompido")
+                    return
+
+            label = cmd.get("url") or cmd.get("selector") or cmd.get("text") or ""
+            yield {"type": "system", "text": f"[{i+1}/{total}] {cmd.get('action')} {label}"}
+            result_event = None
+            async for event in self._execute_cmd(cmd, conv_id, exec_id):
+                yield event
+                if event.get("type") == "result":
+                    result_event = event
+
+            if result_event and result_event.get("ok"):
+                corrected_selector = result_event.get("selector")
+                if corrected_selector and cmd.get("selector") and corrected_selector != cmd.get("selector"):
+                    updated = dict(raw_step)
+                    updated["selector"] = corrected_selector
+                    procs.update_step(proc_name, i, updated)
+                    yield {"type": "system", "text": f"Selector corrigido no JSON no passo {i+1}: {corrected_selector}"}
+            elif result_event and not result_event.get("ok"):
+                corrected = await self._try_correct_step(cmd)
+                if not corrected:
+                    procs.record_execution(proc_name, "reprovado")
+                    yield {"type": "error", "text": f"Procedimento falhou no passo {i+1}: {result_event.get('error','falha')}"}
+                    return
+                yield {"type": "system", "text": f"Auto-correcao no passo {i+1}: {corrected.get('action')} {corrected.get('selector') or corrected.get('text') or ''}"}
+                retry_result = None
+                async for event in self._execute_cmd(corrected, conv_id, exec_id):
+                    yield event
+                    if event.get("type") == "result":
+                        retry_result = event
+                if retry_result and retry_result.get("ok"):
+                    procs.update_step(proc_name, i, corrected)
+                else:
+                    procs.record_execution(proc_name, "reprovado")
+                    yield {"type": "error", "text": f"Procedimento falhou no passo {i+1} apos auto-correcao."}
+                    return
+
+            if cmd.get("action") in ("ask", "error"):
+                return
+
+        ss = await browser.screenshot("replay_final")
+        if ss.get("ok") and ss.get("b64"):
+            yield {"type": "screenshot", "b64": ss["b64"], "label": "Concluido"}
+        procs.record_execution(proc_name, "aprovado")
+        yield {"type": "done", "text": f"Procedimento '{proc_name}' concluido ({total} passos)."}
+
+    async def _try_correct_step(self, cmd: dict) -> Optional[dict]:
+        action = cmd.get("action")
+        context = await browser.get_page_context()
+        options = context.get("buttons", []) + context.get("links", []) + context.get("menus", [])
+        wanted = cmd.get("text") or self._text_from_selector(cmd.get("selector", ""))
+        if action in ("click", "click_text") and wanted:
+            best = self._best_visible_text(wanted, options)
+            if best:
+                return {"action": "click_text", "type": "click_text", "text": best}
+        if action == "fill":
+            value = cmd.get("value", "")
+            words = re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", cmd.get("selector", ""))
+            candidates = [f"input[placeholder*='{word}' i]" for word in words[:3]]
+            candidates += ["input[type='text']", "input:not([type])", "textarea"]
+            for selector in candidates:
+                attempt = await browser.safe_fill(selector, value, timeout=3500, retries=1)
+                if attempt.get("ok"):
+                    return {"action": "fill", "type": "fill", "selector": attempt.get("selector", selector), "value": value}
+        if action == "select":
+            selector = cmd.get("selector", "")
+            value = cmd.get("value", "")
+            if selector:
+                attempt = await browser.select_option(selector, value)
+                if attempt.get("ok"):
+                    return {"action": "select", "type": "select", "selector": selector, "value": value}
+        return None
+
+    def _text_from_selector(self, selector: str) -> str:
+        if not selector:
+            return ""
+        match = re.search(r"has-text\([\"']([^\"']+)[\"']\)", selector)
+        if match:
+            return match.group(1)
+        match = re.search(r"\[.*?=[\"']([^\"']+)[\"']\]", selector)
+        if match:
+            return match.group(1)
+        return selector.replace("#", "").replace(".", " ")
+
+    def _best_visible_text(self, wanted: str, options: list[str]) -> str:
+        wanted_norm = self._norm(wanted)
+        if not wanted_norm:
+            return ""
+        best = ""
+        best_score = 0
+        wanted_tokens = set(re.findall(r"[a-z0-9]{3,}", wanted_norm))
+        for option in options:
+            option_norm = self._norm(option)
+            if not option_norm:
+                continue
+            score = 0
+            if wanted_norm == option_norm:
+                score += 100
+            if wanted_norm in option_norm or option_norm in wanted_norm:
+                score += 50
+            option_tokens = set(re.findall(r"[a-z0-9]{3,}", option_norm))
+            score += 10 * len(wanted_tokens.intersection(option_tokens))
+            if score > best_score:
+                best = option
+                best_score = score
+        return best if best_score >= 10 else ""
 
     async def _replay(self, proc: dict, conv_id: str,
                       exec_id: str, variables: dict) -> AsyncGenerator[dict, None]:

@@ -147,6 +147,30 @@ async def websocket(ws: WebSocket, sid: str):
             elif t == "manual_off":
                 browser.set_manual_mode(False)
                 await wsm.send(sid, {"type": "system", "text": "🤖 Agente retomou controle."})
+            elif t == "teach_start":
+                result = await browser.start_teaching(
+                    msg.get("name") or "procedimento_ensinado",
+                    msg.get("description", ""),
+                )
+                await wsm.send(sid, {
+                    "type": "teach_status",
+                    "teaching": browser.teaching_status(),
+                    "text": f"Modo ensinar ativo: {result.get('name')}",
+                })
+            elif t == "teach_stop":
+                result = await browser.stop_teaching()
+                await wsm.send(sid, {
+                    "type": "teach_status",
+                    "teaching": browser.teaching_status(),
+                    "text": f"Procedimento salvo: {result.get('procedure', {}).get('name', '')}"
+                            if result.get("ok") else result.get("error", "Modo ensinar encerrado."),
+                    "result": result,
+                })
+            elif t == "teach_status":
+                await wsm.send(sid, {
+                    "type": "teach_status",
+                    "teaching": browser.teaching_status(),
+                })
             elif t == "screenshot":
                 ss = await browser.screenshot("manual")
                 if ss.get("ok") and ss.get("b64"):
@@ -245,6 +269,7 @@ async def status():
         "manual_mode":      browser.is_manual_mode,
         "paused":           browser.is_paused,
         "step_mode":        browser.is_step_mode,
+        "teaching":         browser.teaching_status(),
         "approval_pending": browser.approval_pending,
         "approval_message": browser.approval_message,
         "timeout_seconds":  TIMEOUT_SECONDS,
@@ -397,6 +422,21 @@ async def delete_credential(alias: str):
     del sites[alias]
     _write_credentials_file(data)
     return {"deleted": True}
+
+@app.post("/api/teach/start")
+async def teach_start(body: dict):
+    return await browser.start_teaching(
+        body.get("name") or "procedimento_ensinado",
+        body.get("description", ""),
+    )
+
+@app.post("/api/teach/stop")
+async def teach_stop():
+    return await browser.stop_teaching()
+
+@app.get("/api/teach/status")
+async def teach_status():
+    return browser.teaching_status()
 
 @app.get("/api/attachments")
 async def list_attachments():

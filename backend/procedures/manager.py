@@ -4,6 +4,7 @@ Salva/carrega/executa procedimentos em JSON.
 Estrutura: data/procedures/nome_do_procedimento.json
 """
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -46,44 +47,64 @@ def list_procedures() -> list[dict]:
                 "steps_count": len(data.get("steps", [])),
                 "variables":   data.get("variables", []),
                 "created_at":  data.get("created_at", ""),
+                "updated_at":  data.get("updated_at", ""),
+                "last_execution": data.get("last_execution", ""),
+                "last_status": data.get("last_status", "nunca_executado"),
                 "filename":    f.name,
+                "steps":       data.get("steps", []),
             })
         except Exception:
             pass
     return result
 
 
+def sanitize_name(name: str) -> str:
+    safe_name = (name or "").lower().replace(" ", "_").replace("/", "_")
+    safe_name = "".join(c for c in safe_name if c.isalnum() or c in ("_", "-"))
+    return safe_name.strip("_-") or f"procedimento_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+
+
 def get_procedure(name: str) -> Optional[dict]:
     """Busca procedimento por nome (sem .json)."""
     _ensure_dir()
+    safe_name = sanitize_name(name)
+    path = PROCEDURES_DIR / f"{safe_name}.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
     path = PROCEDURES_DIR / f"{name}.json"
     if path.exists():
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     # Busca parcial
     for f in PROCEDURES_DIR.glob("*.json"):
         if name.lower() in f.stem.lower():
-            return json.loads(f.read_text())
+            return json.loads(f.read_text(encoding="utf-8"))
     return None
 
 
 def save_procedure(name: str, description: str, steps: list,
-                   variables: list = None, proc_id: str = None) -> dict:
+                   variables: list = None, proc_id: str = None,
+                   extra: dict = None) -> dict:
     _ensure_dir()
-    # Sanitizar nome para filename
-    safe_name = name.lower().replace(" ", "_").replace("/", "_")
-    safe_name = "".join(c for c in safe_name if c.isalnum() or c == "_")
+    safe_name = sanitize_name(name)
+    now = datetime.utcnow().isoformat()
+    existing = get_procedure(safe_name) or {}
 
     proc = {
-        "id":          proc_id or str(uuid.uuid4()),
+        "id":          proc_id or existing.get("id") or str(uuid.uuid4()),
         "name":        safe_name,
         "description": description,
-        "steps":       steps,
+        "steps":       [normalize_step(step) for step in steps],
         "variables":   variables or _extract_variables(steps),
-        "created_at":  datetime.utcnow().isoformat(),
+        "created_at":  existing.get("created_at") or now,
+        "updated_at":  now,
+        "last_execution": existing.get("last_execution", ""),
+        "last_status": existing.get("last_status", "nunca_executado"),
     }
+    if extra:
+        proc.update(extra)
 
     path = PROCEDURES_DIR / f"{safe_name}.json"
-    path.write_text(json.dumps(proc, ensure_ascii=False, indent=2))
+    path.write_text(json.dumps(proc, ensure_ascii=False, indent=2), encoding="utf-8")
     return proc
 
 
@@ -94,6 +115,50 @@ def delete_procedure(name: str) -> bool:
         path.unlink()
         return True
     return False
+
+
+def normalize_step(step: dict) -> dict:
+    if not isinstance(step, dict):
+        return {"type": "wait", "ms": 500}
+    normalized = dict(step)
+    step_type = normalized.get("type") or normalized.get("action") or "wait"
+    normalized["type"] = step_type
+    normalized.setdefault("action", step_type)
+    return normalized
+
+
+def step_to_cmd(step: dict) -> dict:
+    normalized = normalize_step(step)
+    cmd = dict(normalized)
+    cmd["action"] = normalized.get("action") or normalized.get("type")
+    return cmd
+
+
+def update_step(procedure_name: str, index: int, step: dict) -> Optional[dict]:
+    proc = get_procedure(procedure_name)
+    if not proc:
+        return None
+    steps = proc.get("steps", [])
+    if index < 0 or index >= len(steps):
+        return None
+    steps[index] = normalize_step(step)
+    proc["steps"] = steps
+    proc["updated_at"] = datetime.utcnow().isoformat()
+    path = PROCEDURES_DIR / f"{sanitize_name(proc.get('name', procedure_name))}.json"
+    path.write_text(json.dumps(proc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return proc
+
+
+def record_execution(name: str, status: str) -> Optional[dict]:
+    proc = get_procedure(name)
+    if not proc:
+        return None
+    proc["last_execution"] = datetime.utcnow().isoformat()
+    proc["last_status"] = status
+    proc["updated_at"] = datetime.utcnow().isoformat()
+    path = PROCEDURES_DIR / f"{sanitize_name(proc.get('name', name))}.json"
+    path.write_text(json.dumps(proc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return proc
 
 
 def apply_variables(steps: list, variables: dict) -> list:
@@ -120,6 +185,22 @@ def _extract_variables(steps: list) -> list:
                 for match in re.findall(r'\{(\w+)\}', v):
                     vars_found.add(match)
     return sorted(vars_found)
+
+
+def infer_name_from_text(text: str) -> str:
+    value = (text or "").strip()
+    quoted = re.search(r'"([^"]+)"|\'([^\']+)\'', value)
+    if quoted:
+        return sanitize_name(quoted.group(1) or quoted.group(2))
+    patterns = [
+        r"(?:procedimento|ensinar|executar|testar)\s+([A-Za-z0-9À-ÿ _-]{3,80})",
+        r"(?:modo ensinar)\s+([A-Za-z0-9À-ÿ _-]{3,80})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if match:
+            return sanitize_name(match.group(1))
+    return ""
 
 
 # Procedimentos de exemplo para iniciar

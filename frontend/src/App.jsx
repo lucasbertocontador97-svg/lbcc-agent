@@ -62,6 +62,10 @@ function ProceduresPage({ onRun }) {
               <div className="exec-status-dot" style={{ background:"#3b6eea" }} />
               <div className="exec-info">
                 <div className="exec-cmd">{p.name}</div>
+                <div className="exec-meta">
+                  {p.last_status || "nunca_executado"}
+                  {p.last_execution && ` | ${new Date(p.last_execution).toLocaleString()}`}
+                </div>
                 <div className="exec-meta">{p.description} · {p.steps_count} passos
                   {p.variables?.length > 0 && ` · vars: ${p.variables.join(", ")}`}
                 </div>
@@ -78,7 +82,13 @@ function ProceduresPage({ onRun }) {
         {selected && (
           <div className="exec-detail">
             <div className="exec-detail-header">
-              <div style={{ fontWeight:600, color:"var(--text)" }}>{selected.name}</div>
+              <div>
+                <div style={{ fontWeight:600, color:"var(--text)" }}>{selected.name}</div>
+                <div className="exec-meta">
+                  {selected.steps_count} passos | {selected.last_status || "nunca_executado"}
+                  {selected.last_execution && ` | ultima execucao: ${new Date(selected.last_execution).toLocaleString()}`}
+                </div>
+              </div>
               <button className="btn-sm" onClick={() => onRun(selected.name)}>▶ Executar</button>
             </div>
             <div className="log-list">
@@ -426,6 +436,7 @@ export default function App() {
   const [stepMode, setStepMode]   = useState(false);
   const [stepWaiting, setStepWaiting] = useState(false);
   const [manualMode, setManualMode] = useState(false);
+  const [teaching, setTeaching]     = useState({active:false});
   const [approvalPending, setApprovalPending] = useState(false);
   const [approvalMsg, setApprovalMsg]         = useState("");
   const [sidebarOpen, setSidebarOpen]         = useState(true);
@@ -442,6 +453,11 @@ export default function App() {
     if (type === "screenshot") {
       setLastScreenshot(ev.b64);
       setEvents(prev => [...prev, ev]);
+      return;
+    }
+    if (type === "teach_status") {
+      setTeaching(ev.teaching || {active:false});
+      setEvents(prev => [...prev, {type:"system", text: ev.text || "Status do modo ensinar atualizado."}]);
       return;
     }
     if (["action","result","system","retry","paused","resumed","download","context"].includes(type)) {
@@ -471,6 +487,7 @@ export default function App() {
     api.listConvs().then(setConvs).catch(()=>{});
     const poll = () => api.status().then(s => {
       setManualMode(s.manual_mode||false);
+      setTeaching(s.teaching || {active:false});
       setPaused(s.paused||false);
       setTabs(s.tabs||[]);
     }).catch(()=>{});
@@ -526,6 +543,13 @@ export default function App() {
   const doNextStep = () => { setStepWaiting(false); send({type:"next_step"}); };
   const toggleStep = () => { const n=!stepMode; setStepMode(n); send({type:n?"step_mode_on":"step_mode_off"}); };
   const toggleManual = () => { send({type:manualMode?"manual_off":"manual_on"}); setManualMode(v=>!v); };
+  const startTeach = () => {
+    const name = prompt("Nome do procedimento:", "baixar_documento");
+    if (!name) return;
+    const description = prompt("Descricao:", `Procedimento ensinado: ${name}`) || "";
+    send({type:"teach_start", name, description});
+  };
+  const stopTeach = () => send({type:"teach_stop"});
   const switchTab = (i) => send({type:"switch_tab",index:i});
   const closeTab  = (i) => send({type:"close_tab",index:i});
   const newTab    = () => send({type:"new_tab",url:""});
@@ -600,6 +624,10 @@ export default function App() {
               <button className="icon-btn" onClick={()=>send({type:"screenshot"})}><Icon.Camera /></button>
               <button className={`ctrl-btn${stepMode?" manual-active":""}`} onClick={toggleStep}>🔢</button>
               {busy && <button className="ctrl-btn" onClick={doPause}>{paused?"▶":"⏸"}</button>}
+              <button className={`ctrl-btn${teaching.active?" manual-active":""}`}
+                      onClick={teaching.active ? stopTeach : startTeach}>
+                {teaching.active ? "Parar ensino" : "Ensinar"}
+              </button>
               <button className={`ctrl-btn${manualMode?" manual-active":""}`} onClick={toggleManual}>
                 {manualMode?"🖐 Manual":"🤖 Auto"}
               </button>
