@@ -489,6 +489,8 @@ export default function App() {
       setManualMode(s.manual_mode||false);
       setTeaching(s.teaching || {active:false});
       setPaused(s.paused||false);
+      setApprovalPending(s.approval_pending||false);
+      setApprovalMsg(s.approval_message||"");
       setTabs(s.tabs||[]);
     }).catch(()=>{});
     poll();

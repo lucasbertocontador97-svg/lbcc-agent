@@ -110,6 +110,12 @@ class Agent:
                 yield event
             return
 
+        govbr_command = self._classify_govbr_command(user_message)
+        if govbr_command:
+            async for event in self._run_govbr_command(govbr_command, conv_id, exec_id):
+                yield event
+            return
+
         iob_command = self._classify_iob_command(user_message)
         if iob_command:
             async for event in self._run_iob_command(iob_command, conv_id, exec_id, user_message):
@@ -295,6 +301,79 @@ class Agent:
             yield {"type": "teach_status", **browser.teaching_status()}
             return
         yield {"type": "teach_status", **browser.teaching_status()}
+
+    def _classify_govbr_command(self, msg: str) -> Optional[dict]:
+        normalized = self._norm(msg)
+        if "cpf" not in normalized:
+            return None
+        digits = re.sub(r"\D", "", msg or "")
+        if len(digits) < 11:
+            return None
+        if "gov.br" not in (browser.url or "").lower() and "sso.acesso.gov.br" not in (browser.url or "").lower():
+            return None
+        return {
+            "action": "fill_cpf",
+            "cpf": digits[:11],
+            "submit": any(token in normalized for token in ("continuar", "entrar", "prosseguir", "avancar", "avançar")),
+        }
+
+    async def _run_govbr_command(self, command: dict, conv_id: str, exec_id: str) -> AsyncGenerator[dict, None]:
+        cpf = command.get("cpf", "")
+        selectors = [
+            "input[name='accountId']",
+            "#accountId",
+            "input[placeholder*='CPF' i]",
+            "input[aria-label*='CPF' i]",
+            "input[type='tel']",
+            "input[type='text']",
+        ]
+        yield {"type": "system", "text": "Preenchendo CPF no gov.br diretamente, sem passar pelo GPT."}
+        result = {"ok": False, "error": "Campo CPF nao encontrado."}
+        used_selector = ""
+        for selector in selectors:
+            result = await browser.safe_fill(selector, cpf, timeout=4500, retries=1)
+            if result.get("ok"):
+                used_selector = result.get("selector", selector)
+                break
+
+        await db.save_action_log(
+            str(uuid.uuid4()),
+            conv_id,
+            exec_id,
+            "govbr_fill_cpf",
+            {"selector": used_selector or selectors, "value_len": len(cpf)},
+            {k: v for k, v in result.items() if k != "value"},
+            result.get("ok", False),
+        )
+        yield {"type": "result", **result}
+
+        ss = await browser.screenshot("govbr_cpf_preenchido")
+        if ss.get("ok") and ss.get("b64"):
+            yield {"type": "screenshot", "b64": ss["b64"], "label": "CPF preenchido"}
+
+        if not result.get("ok"):
+            yield {"type": "error", "text": result.get("error", "Nao consegui preencher o CPF.")}
+            return
+
+        if command.get("submit"):
+            click = await browser.click_text("Continuar", timeout=5000)
+            if not click.get("ok"):
+                click = await browser.safe_click("button:has-text('Continuar')", timeout=5000, retries=1)
+            await db.save_action_log(
+                str(uuid.uuid4()),
+                conv_id,
+                exec_id,
+                "govbr_click_continuar",
+                {"text": "Continuar"},
+                click,
+                click.get("ok", False),
+            )
+            yield {"type": "result", **click}
+            if not click.get("ok"):
+                yield {"type": "done", "text": "CPF preenchido. Nao consegui clicar em Continuar automaticamente."}
+                return
+
+        yield {"type": "done", "text": "CPF preenchido no gov.br."}
 
     def _norm(self, value: str) -> str:
         return "".join(
