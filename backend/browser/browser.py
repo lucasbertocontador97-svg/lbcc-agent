@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -585,6 +586,100 @@ class Browser:
         attempts += [f"text={selector}", f":text('{selector}')"]
         return list(dict.fromkeys(attempts))
 
+    def _css_value(self, value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _selector_hint_words(self, selector: str) -> list[str]:
+        hints = re.findall(r"['\"]([^'\"]{3,})['\"]", selector or "")
+        if not hints and selector:
+            hints = [selector]
+        words: list[str] = []
+        for hint in hints:
+            for word in re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", hint):
+                lowered = word.lower()
+                if lowered not in ("input", "textarea", "placeholder", "button"):
+                    words.append(word)
+        return list(dict.fromkeys(words))
+
+    def _fill_selector_attempts(self, selector: str) -> list[str]:
+        attempts = [selector]
+        words = self._selector_hint_words(selector)
+        for word in words:
+            value = self._css_value(word)
+            attempts += [
+                f"input[placeholder*=\"{value}\" i]",
+                f"textarea[placeholder*=\"{value}\" i]",
+                f"input[name*=\"{value}\" i]",
+                f"input[aria-label*=\"{value}\" i]",
+            ]
+        return list(dict.fromkeys(attempts))
+
+    async def _fallback_input_selector(self, selector: str) -> str:
+        words = self._selector_hint_words(selector)
+        if not words:
+            return ""
+        token = f"lbcc-fallback-{int(time.time() * 1000)}"
+        try:
+            found = await self._page.evaluate(
+                """({words, token}) => {
+                    const normalize = value => (value || '')
+                        .normalize('NFD')
+                        .replace(/[\\u0300-\\u036f]/g, '')
+                        .toLowerCase();
+                    const wanted = words.map(normalize).filter(Boolean);
+                    const nodes = Array.from(document.querySelectorAll(
+                        'input, textarea, [contenteditable="true"]'
+                    ));
+                    const visible = el => {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style && style.visibility !== 'hidden'
+                            && style.display !== 'none'
+                            && rect.width > 4
+                            && rect.height > 4;
+                    };
+                    let best = null;
+                    let bestScore = 0;
+                    for (const el of nodes) {
+                        if (!visible(el) || el.disabled || el.readOnly) continue;
+                        const haystack = normalize([
+                            el.getAttribute('placeholder'),
+                            el.getAttribute('aria-label'),
+                            el.getAttribute('name'),
+                            el.getAttribute('id'),
+                            el.getAttribute('class'),
+                            el.textContent
+                        ].filter(Boolean).join(' '));
+                        const score = wanted.reduce((total, word) => (
+                            total + (haystack.includes(word) ? 1 : 0)
+                        ), 0);
+                        if (score > bestScore) {
+                            best = el;
+                            bestScore = score;
+                        }
+                    }
+                    if (!best || bestScore === 0) return '';
+                    best.setAttribute('data-lbcc-fallback-target', token);
+                    return `[data-lbcc-fallback-target="${token}"]`;
+                }""",
+                {"words": words, "token": token},
+            )
+            if found:
+                self._log("safe_fill", {
+                    "selector": selector,
+                    "step": "fallback_input_encontrado",
+                    "fallback_selector": found,
+                    "words": words,
+                })
+            return found or ""
+        except Exception as e:
+            self._log("safe_fill", {
+                "selector": selector,
+                "step": "fallback_input_falhou",
+                "error": str(e)[:250],
+            })
+            return ""
+
     async def click(self, selector: str) -> dict:
         return await self.safe_click(selector)
 
@@ -662,64 +757,81 @@ class Browser:
     async def fill(self, selector: str, value: str) -> dict:
         return await self.safe_fill(selector, value)
 
+    async def _safe_fill_selector_once(self, selector: str, value: str, timeout: int, attempt_no: int) -> dict:
+        locator = self._page.locator(selector).first
+        await locator.wait_for(state="attached", timeout=timeout)
+        self._log("safe_fill", {"selector": selector, "step": "elemento_encontrado", "attempt": attempt_no})
+        await locator.scroll_into_view_if_needed(timeout=timeout)
+        await locator.wait_for(state="visible", timeout=timeout)
+        self._log("safe_fill", {"selector": selector, "step": "elemento_visivel", "attempt": attempt_no})
+        enabled = await locator.is_enabled(timeout=2_000)
+        if not enabled:
+            self._log("safe_fill", {"selector": selector, "step": "campo_desabilitado", "attempt": attempt_no})
+            raise RuntimeError("Campo desabilitado")
+        overlay = await self._overlay_info(locator)
+        if overlay.get("blocked"):
+            self._log("safe_fill", {"selector": selector, "step": "overlay_detectado", "overlay": overlay})
+        await self.highlight_element(locator, f"fill:{selector[:60]}")
+        await locator.click(timeout=timeout)
+        try:
+            await locator.fill("", timeout=timeout)
+        except Exception:
+            await self._page.keyboard.press("Control+A")
+            await self._page.keyboard.press("Backspace")
+        await locator.fill(value, timeout=timeout)
+        filled = await self._locator_value(locator)
+        if filled != value:
+            self._log("safe_fill", {
+                "selector": selector,
+                "step": "valor_divergente",
+                "expected_len": len(value),
+                "actual_len": len(filled),
+            })
+            raise RuntimeError(
+                f"Valor preenchido divergente: esperado {len(value)} chars, obtido {len(filled)} chars"
+            )
+        self._log("safe_fill", {
+            "selector": selector,
+            "step": "valor_preenchido",
+            "value_len": len(value),
+            "attempt": attempt_no,
+        })
+        await self.wait_for_react()
+        return {"ok": True, "selector": selector, "value_len": len(value), "attempt": attempt_no}
+
     async def safe_fill(self, selector: str, value: str, timeout: int = 12000, retries: int = 2) -> dict:
         async with self._lock:
             last_error = ""
             for attempt_no in range(1, retries + 1):
-                try:
-                    await self.wait_for_react()
-                    locator = self._page.locator(selector).first
-                    await locator.wait_for(state="attached", timeout=timeout)
-                    self._log("safe_fill", {"selector": selector, "step": "elemento_encontrado", "attempt": attempt_no})
-                    await locator.scroll_into_view_if_needed(timeout=timeout)
-                    await locator.wait_for(state="visible", timeout=timeout)
-                    self._log("safe_fill", {"selector": selector, "step": "elemento_visivel", "attempt": attempt_no})
-                    enabled = await locator.is_enabled(timeout=2_000)
-                    if not enabled:
-                        last_error = "Campo desabilitado"
-                        self._log("safe_fill", {"selector": selector, "step": "campo_desabilitado", "attempt": attempt_no})
-                        raise RuntimeError(last_error)
-                    overlay = await self._overlay_info(locator)
-                    if overlay.get("blocked"):
-                        self._log("safe_fill", {"selector": selector, "step": "overlay_detectado", "overlay": overlay})
-                    await self.highlight_element(locator, f"fill:{selector[:60]}")
-                    await locator.click(timeout=timeout)
+                await self.wait_for_react()
+                candidates = self._fill_selector_attempts(selector)
+                fallback = await self._fallback_input_selector(selector)
+                if fallback:
+                    candidates.append(fallback)
+                for candidate in candidates:
                     try:
-                        await locator.fill("", timeout=timeout)
-                    except Exception:
-                        await self._page.keyboard.press("Control+A")
-                        await self._page.keyboard.press("Backspace")
-                    await locator.fill(value, timeout=timeout)
-                    filled = await self._locator_value(locator)
-                    if filled != value:
-                        last_error = f"Valor preenchido divergente: esperado {len(value)} chars, obtido {len(filled)} chars"
+                        candidate_timeout = min(timeout, 3500) if candidate == selector and len(candidates) > 1 else timeout
+                        result = await self._safe_fill_selector_once(candidate, value, candidate_timeout, attempt_no)
+                        if candidate != selector:
+                            result["original_selector"] = selector
+                        return result
+                    except Exception as e:
+                        last_error = str(e)
+                        step = "elemento_invisivel" if "visible" in last_error.lower() else "falha"
                         self._log("safe_fill", {
-                            "selector": selector,
-                            "step": "valor_divergente",
-                            "expected_len": len(value),
-                            "actual_len": len(filled),
+                            "selector": candidate,
+                            "original_selector": selector,
+                            "step": step,
+                            "error": last_error[:250],
                         })
-                        raise RuntimeError(last_error)
-                    self._log("safe_fill", {
-                        "selector": selector,
-                        "step": "valor_preenchido",
-                        "value_len": len(value),
-                        "attempt": attempt_no,
-                    })
-                    await self.wait_for_react()
-                    return {"ok": True, "selector": selector, "value_len": len(value), "attempt": attempt_no}
-                except Exception as e:
-                    last_error = str(e)
-                    step = "elemento_invisivel" if "visible" in last_error.lower() else "falha"
-                    self._log("safe_fill", {"selector": selector, "step": step, "error": last_error[:250]})
-                    ss = await self.screenshot(f"safe_fill_retry_{attempt_no}")
-                    self._log("safe_fill_retry", {
-                        "selector": selector,
-                        "attempt": attempt_no,
-                        "error": last_error[:300],
-                        "screenshot": ss.get("filename"),
-                    })
-                    await asyncio.sleep(0.6)
+                ss = await self.screenshot(f"safe_fill_retry_{attempt_no}")
+                self._log("safe_fill_retry", {
+                    "selector": selector,
+                    "attempt": attempt_no,
+                    "error": last_error[:300],
+                    "screenshot": ss.get("filename"),
+                })
+                await asyncio.sleep(0.6)
             return {"ok": False, "selector": selector, "error": last_error[:300]}
 
     async def fill_login_credentials(self, email: str, password: str, submit: bool = True) -> dict:
