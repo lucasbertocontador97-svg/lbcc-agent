@@ -461,6 +461,94 @@ class Browser:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
+    async def fill_login_credentials(self, email: str, password: str, submit: bool = True) -> dict:
+        async with self._lock:
+            if not email or not password:
+                return {"ok": False, "error": "IOB_EMAIL ou IOB_PASSWORD ausente no .env"}
+
+            email_selectors = [
+                "input[type='email']",
+                "input[name*='email']",
+                "input[name*='usuario']",
+                "input[name*='user']",
+                "input[id*='email']",
+                "input[id*='usuario']",
+                "input[id*='user']",
+                "input[placeholder*='email']",
+                "input[placeholder*='E-mail']",
+                "input[placeholder*='usuário']",
+                "input[placeholder*='Usuario']",
+                "input[type='text']",
+            ]
+            password_selectors = [
+                "input[type='password']",
+                "input[name*='senha']",
+                "input[name*='password']",
+                "input[id*='senha']",
+                "input[id*='password']",
+            ]
+
+            email_selector = await self._fill_first_visible(email_selectors, email)
+            password_selector = await self._fill_first_visible(password_selectors, password)
+
+            if not email_selector or not password_selector:
+                return {
+                    "ok": False,
+                    "error": "Nao encontrei campos visiveis de email/senha",
+                    "email_filled": bool(email_selector),
+                    "password_filled": bool(password_selector),
+                }
+
+            clicked_selector = ""
+            if submit:
+                submit_selectors = [
+                    "button[type='submit']",
+                    "input[type='submit']",
+                    "button:has-text('Entrar')",
+                    "button:has-text('Acessar')",
+                    "button:has-text('Login')",
+                    "text=Entrar",
+                    "text=Acessar",
+                ]
+                for selector in submit_selectors:
+                    try:
+                        locator = self._page.locator(selector).first
+                        await locator.click(timeout=5_000)
+                        clicked_selector = selector
+                        break
+                    except Exception:
+                        continue
+
+            try:
+                await self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
+            except Exception:
+                pass
+
+            result = {
+                "ok": True,
+                "email_selector": email_selector,
+                "password_selector": password_selector,
+                "submitted": bool(clicked_selector),
+                "submit_selector": clicked_selector,
+            }
+            self._log("fill_login_credentials", {
+                "email_selector": email_selector,
+                "password_selector": password_selector,
+                "submitted": bool(clicked_selector),
+            })
+            return result
+
+    async def _fill_first_visible(self, selectors: list[str], value: str) -> str:
+        for selector in selectors:
+            try:
+                locator = self._page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=3_000)
+                await locator.fill(value, timeout=5_000)
+                return selector
+            except Exception:
+                continue
+        return ""
+
     async def key(self, key: str) -> dict:
         try:
             await self._page.keyboard.press(key)

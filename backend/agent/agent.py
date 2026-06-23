@@ -82,6 +82,8 @@ class Agent:
         load_dotenv()
         self._client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self._iob_url = os.getenv("IOB_URL", IOB_URL)
+        self._iob_email = os.getenv("IOB_EMAIL", "")
+        self._iob_password = os.getenv("IOB_PASSWORD", "")
 
     async def run(
         self,
@@ -263,6 +265,42 @@ class Agent:
                 yield {"type": "done", "text": "Login do IOB confirmado."}
                 return
 
+            if self._iob_email and self._iob_password:
+                yield {"type": "system", "text": "Credenciais IOB encontradas no .env. Tentando login automatico."}
+                ss_before = await browser.screenshot("before_iob_login_credentials")
+                if ss_before.get("ok") and ss_before.get("b64"):
+                    yield {"type": "screenshot", "b64": ss_before["b64"], "label": "Antes: login IOB"}
+
+                result = await browser.fill_login_credentials(self._iob_email, self._iob_password)
+                safe_result = {
+                    **result,
+                    "email": self._mask_email(self._iob_email),
+                    "password_set": bool(self._iob_password),
+                }
+                yield {"type": "result", **safe_result}
+                await db.save_action_log(
+                    str(uuid.uuid4()), conv_id, exec_id,
+                    "iob_login_credentials",
+                    {"email": self._mask_email(self._iob_email), "password_set": True},
+                    safe_result,
+                    result.get("ok", False),
+                )
+
+                ss_after = await browser.screenshot("after_iob_login_credentials")
+                if ss_after.get("ok") and ss_after.get("b64"):
+                    yield {"type": "screenshot", "b64": ss_after["b64"], "label": "Depois: login IOB"}
+
+                await browser.wait(1500)
+                context = await browser.get_page_context()
+                yield {"type": "context", "context": context}
+                if self._looks_logged_in(context):
+                    yield {"type": "done", "text": "Login do IOB confirmado com credenciais locais."}
+                    return
+
+                yield {"type": "system", "text": "Login automatico nao foi confirmado; mantendo fallback manual."}
+            else:
+                yield {"type": "system", "text": "IOB_EMAIL/IOB_PASSWORD ainda nao estao definidos no .env."}
+
             yield {
                 "type": "ask",
                 "text": "Preciso de intervencao humana para concluir o login do IOB. Entre manualmente e aprove para continuar.",
@@ -313,6 +351,12 @@ class Agent:
             + context.get("menus", [])
         ).lower()
         return any(token in haystack for token in ("sair", "logout", "minha conta", "folha", "dashboard"))
+
+    def _mask_email(self, email: str) -> str:
+        if "@" not in email:
+            return "***"
+        left, right = email.split("@", 1)
+        return f"{left[:2]}***@{right}"
 
     async def _send_context_to_gpt(self, objective: str, action: dict, context: dict) -> Optional[str]:
         try:
